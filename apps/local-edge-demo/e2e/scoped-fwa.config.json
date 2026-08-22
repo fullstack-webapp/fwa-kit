@@ -1,0 +1,17 @@
+{
+  "appId": "fwa-scoped-fixture",
+  "localEdgeEnabled": true,
+  "scopePath": "/scoped/",
+  "workerPath": "/scoped/__fwa-sw.js",
+  "descriptorPath": "/scoped/__fwa/release.json",
+  "controlPrefix": "/scoped/__fwa",
+  "appEntry": "/scoped/",
+  "appRequestPrefixes": ["/scoped/api/"],
+  "releaseAssetPrefixes": ["/scoped/assets/"],
+  "supplementalAssetPaths": [],
+  "navigation": {
+    "appPaths": ["/scoped/"],
+    "appPathPrefixes": [],
+    "notFound": { "strategy": "network" }
+  }
+}

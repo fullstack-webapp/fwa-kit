@@ -1,0 +1,87 @@
+{
+  "name": "@fullstack-webapp/local-edge",
+  "version": "0.1.0-beta.0",
+  "description": "Browser-side runtime for atomic web app code releases, explicit request ownership, network-resilient startup, updates, and recovery.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fullstack-webapp/fwa-kit.git",
+    "directory": "packages/local-edge"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "exports": {
+    "./vite": {
+      "types": "./dist-sdk/vite.d.ts",
+      "import": "./dist-sdk/vite.js",
+      "default": "./dist-sdk/vite.js"
+    },
+    "./client": {
+      "types": "./dist-sdk/client.d.ts",
+      "import": "./dist-sdk/client.js",
+      "default": "./dist-sdk/client.js"
+    }
+  },
+  "bin": {
+    "fwa-publish-release": "./src/build/publish-release.mjs"
+  },
+  "files": [
+    "dist-sdk/**",
+    "docs/**",
+    "src/build/manifest-closure.mjs",
+    "src/build/media-type.mjs",
+    "src/build/publish-release.mjs",
+    "src/build/release-asset-ownership.mjs",
+    "src/config-contract.ts",
+    "src/config.ts",
+    "src/release.ts",
+    "src/route-policy.ts",
+    "src/loader/debug-installation.ts",
+    "src/loader/debug-panel.ts",
+    "src/loader/debug-position.ts",
+    "src/loader/debug-trigger.ts",
+    "src/loader/debug-preference.ts",
+    "src/loader/debug-runtime.ts",
+    "src/loader/document-runtime.ts",
+    "src/loader/loader-contract.ts",
+    "src/loader/loader-entry.ts",
+    "src/loader/loader-paths.ts",
+    "src/worker/bounded-tasks.ts",
+    "src/worker/kernel-recovery.ts",
+    "src/worker/local-edge-worker.ts",
+    "src/worker/release-metadata.ts",
+    "src/worker/release-runtime.ts",
+    "src/worker/release-verifier.ts",
+    "src/worker/request-recovery.ts",
+    "src/worker/worker-entry.ts",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  },
+  "scripts": {
+    "build": "pnpm build:sdk",
+    "build:sdk": "vite build --config vite.sdk.config.ts && vite build --config vite.client-sdk.config.ts",
+    "lint": "oxlint --ignore-pattern dist-sdk",
+    "typecheck": "tsc -p tsconfig.json --pretty false && tsc -p tsconfig.node.json --pretty false && tsc -p tsconfig.worker.json --pretty false",
+    "test": "vitest run --config vitest.config.ts src && pnpm test:build && pnpm test:sdk",
+    "test:build": "node --test src/build/*.node-test.mjs",
+    "test:sdk": "pnpm build:sdk && node scripts/verify-sdk-entry.mjs",
+    "prepack": "pnpm build:sdk && node scripts/verify-sdk-entry.mjs",
+    "pack:check": "pnpm pack --dry-run"
+  },
+  "peerDependencies": {
+    "vite": ">=7 <9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "vitest": "^4.1.10"
+  }
+}

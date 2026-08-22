@@ -1,0 +1,31 @@
+{
+  "name": "@fullstack-webapp/local-edge-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build && vite build --config vite.loader.config.ts && vite build --config vite.worker.config.ts && fwa-publish-release",
+    "build:e2e-fixture": "FWA_CONFIG_PATH=./e2e/scoped-fwa.config.json vite build --config vite.loader.config.ts && vite build --config vite.scoped-worker.config.ts && node e2e/finalize-scoped-fixture.mjs",
+    "lint": "oxlint",
+    "typecheck": "tsc -b --pretty false",
+    "preview": "vite preview",
+    "e2e": "pnpm build && pnpm build:e2e-fixture && playwright test",
+    "test:hosting": "pnpm build && node scripts/verify-pages-hosting.mjs"
+  },
+  "dependencies": {
+    "@fullstack-webapp/local-edge": "workspace:*",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "wrangler": "4.114.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "appId": "fwa-local-edge-demo",
+  "localEdgeEnabled": true,
+  "scopePath": "/",
+  "workerPath": "/__fwa-sw.js",
+  "descriptorPath": "/__fwa/release.json",
+  "controlPrefix": "/__fwa",
+  "appEntry": "/",
+  "appRequestPrefixes": ["/api/"],
+  "releaseAssetPrefixes": ["/assets/"],
+  "supplementalAssetPaths": ["/favicon.svg"],
+  "navigation": {
+    "appPaths": ["/", "/library/"],
+    "appPathPrefixes": ["/library/"],
+    "notFound": { "strategy": "app-entry" }
+  }
+}
