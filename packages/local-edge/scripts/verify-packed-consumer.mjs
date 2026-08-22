@@ -79,7 +79,7 @@ try {
     ),
   ])
 
-  run('pnpm', ['install', '--offline', '--ignore-scripts'], consumerRoot)
+  run('pnpm', ['install', '--prefer-offline', '--ignore-scripts'], consumerRoot)
   run('pnpm', ['exec', 'vite', 'build'], consumerRoot)
   run(
     'pnpm',
