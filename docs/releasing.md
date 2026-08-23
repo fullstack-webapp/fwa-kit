@@ -6,17 +6,13 @@ FWA Kit packages use independent versions. The Local Edge tag format is:
 local-edge@<version>
 ```
 
-The first public beta is `local-edge@0.1.0-beta.1`.
+The first public beta is [`local-edge@0.1.0-beta.1`](https://github.com/fullstack-webapp/fwa-kit/releases/tag/local-edge%400.1.0-beta.1).
 
 Publishing is tag-driven through `.github/workflows/publish.yml` and the protected GitHub Environment `npm-publish`. The workflow grants only `contents: read` and `id-token: write`, requires a maintainer environment approval, verifies the tag against the package version and the current `main` revision, reruns the complete public matrix, and publishes only `packages/local-edge/`.
 
-The package does not exist in the npm registry before the first beta, so npm cannot yet attach a trusted publisher through package settings. The first publish uses a short-lived granular token stored only as the `NPM_TOKEN` environment secret. After that publish:
+Releases authenticate only through the npm trusted publisher for `fullstack-webapp/fwa-kit`, workflow `publish.yml`, environment `npm-publish`, and the `npm publish` action. Publishing access requires two-factor authentication and disallows traditional tokens. GitHub Packages credentials, npm tokens, and package publishing from the general CI workflow remain out of scope.
 
-1. Configure the package trusted publisher for `fullstack-webapp/fwa-kit`, `publish.yml`, environment `npm-publish`, and the `npm publish` action.
-2. Set publishing access to require two-factor authentication and disallow traditional tokens.
-3. Delete the `NPM_TOKEN` environment secret and remove its workflow fallback.
-
-Subsequent releases authenticate only through npm trusted publishing. GitHub Packages credentials, repository-level npm tokens, and package publishing from the general CI workflow remain out of scope.
+The first publish established both `beta` and `latest` at `0.1.0-beta.1`. A later prerelease must decide explicitly whether the default-install `latest` tag moves with `beta`; publishing with `--tag beta` must not be assumed to update both tags.
 
 Before a release is enabled:
 
@@ -29,8 +25,8 @@ Before a release is enabled:
 Create a release tag only from the current protected `main` revision:
 
 ```bash
-git tag local-edge@0.1.0-beta.1
-git push origin local-edge@0.1.0-beta.1
+git tag -a local-edge@<version> -m "Release @fullstack-webapp/local-edge <version>"
+git push origin local-edge@<version>
 ```
 
 The tag push starts the publish workflow. Do not create the GitHub release until npm publication and anonymous installation have both succeeded.
