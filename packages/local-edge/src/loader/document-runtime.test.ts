@@ -168,7 +168,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
     expect(reload).not.toHaveBeenCalled()
   })
 
-  it('accepts a controlled worker that matches the kernel protocol identity', async () => {
+  it('accepts a controlled worker that meets the required kernel protocol level', async () => {
     const { reload, replaceServiceWorker } = stubControlledKernel(
       String(fwaKernelProtocolVersion),
     )
@@ -191,9 +191,33 @@ describe('createLocalEdgeDocumentRuntime', () => {
     expect(reload).not.toHaveBeenCalled()
   })
 
+  it('allows a cached loader to continue with a newer backward-compatible kernel', async () => {
+    const { reload, replaceServiceWorker } = stubControlledKernel(
+      String(fwaKernelProtocolVersion + 1),
+    )
+    const runtime = createLocalEdgeDocumentRuntime(documentConfig, {
+      async registerServiceWorker() {
+        throw new Error('registration is not expected')
+      },
+      replaceServiceWorker,
+    })
+
+    runtime.start()
+    await waitForPhase(runtime, 'ready')
+
+    expect(runtime.getState()).toMatchObject({
+      controlled: true,
+      phase: 'ready',
+      releaseId: 'release-a',
+    })
+    expect(replaceServiceWorker).not.toHaveBeenCalled()
+    expect(reload).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['missing', undefined],
-    ['mismatched', String(fwaKernelProtocolVersion - 1)],
+    ['invalid', 'not-a-version'],
+    ['older', String(fwaKernelProtocolVersion - 1)],
   ])(
     'routes a controlled worker with a %s protocol identity through one guarded takeover',
     async (_case, protocolVersion) => {

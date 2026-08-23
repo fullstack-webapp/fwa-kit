@@ -19,9 +19,11 @@ X-FWA-Kernel: /__fwa-sw.js
 X-FWA-Kernel-Protocol: 1
 ```
 
-The loader accepts a controlling worker only when both identities match. A missing or mismatched protocol follows the same guarded Service Worker replacement path as any incompatible controller.
+The protocol number is a monotonic kernel capability level. The loader treats its bundled value as the minimum level it requires and accepts a controlling worker whose level is equal or newer. A missing, invalid, or older level follows the same guarded Service Worker replacement path as any incompatible controller.
 
-The kernel protocol version changes only when the document loader and worker can no longer communicate safely. It is independent of package versions and the release descriptor `schemaVersion`.
+Workers must preserve the loader-facing behavior of protocol levels they already implement. This lets a loader cached in an older committed release continue with a newer worker while a newer loader can still replace an older worker that lacks required capabilities.
+
+The kernel protocol level is independent of package versions and the release descriptor `schemaVersion`. Removing support for an older loader protocol requires a loader update channel outside the active release; incrementing this number alone is not a safe breaking-change mechanism.
 
 ## Global facade
 
