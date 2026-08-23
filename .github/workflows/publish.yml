@@ -1,0 +1,64 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "local-edge@*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-local-edge:
+    name: publish-local-edge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm-publish
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag and default-branch source
+        run: |
+          git fetch --no-tags origin main
+          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$(git rev-parse origin/main)"
+          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$(git rev-parse HEAD)"
+          node packages/local-edge/scripts/verify-release-tag.mjs "$GITHUB_REF_NAME"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.1.1
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Setup npm trusted-publishing client
+        run: npm install --global npm@12.0.2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm --filter @fullstack-webapp/local-edge-demo exec playwright install --with-deps chromium
+
+      - name: Verify release source and package
+        run: pnpm run ci
+
+      - name: Publish Local Edge
+        working-directory: packages/local-edge
+        run: npm publish --access public --tag beta --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
