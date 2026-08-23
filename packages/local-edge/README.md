@@ -20,7 +20,7 @@ The loader and worker source files are included in the package and bundled by th
 pnpm add -D @fullstack-webapp/local-edge
 ```
 
-The current public prerelease is [`0.1.0-beta.1`](https://www.npmjs.com/package/@fullstack-webapp/local-edge/v/0.1.0-beta.1). The workspace demo remains the executable integration example.
+The current public prerelease is [`0.1.0-beta.2`](https://www.npmjs.com/package/@fullstack-webapp/local-edge/v/0.1.0-beta.2). The workspace demo remains the executable integration example.
 
 ## Configure
 
