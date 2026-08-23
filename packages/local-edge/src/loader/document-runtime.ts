@@ -5,6 +5,8 @@ import type {
 import {
   localEdgeControlPathsFor,
   fwaKernelProbeHeaderName,
+  fwaKernelProtocolHeaderName,
+  fwaKernelProtocolVersion,
   pathWithLocalEdgeNavigationMode,
   localEdgeNavigationModeFor,
 } from '../config-contract.ts'
@@ -70,7 +72,9 @@ export function createLocalEdgeDocumentRuntime(
       throw new Error(`runtime snapshot returned ${response.status}`)
     }
     if (
-      response.headers.get(fwaKernelProbeHeaderName) !== config.workerPath
+      response.headers.get(fwaKernelProbeHeaderName) !== config.workerPath ||
+      response.headers.get(fwaKernelProtocolHeaderName) !==
+        String(fwaKernelProtocolVersion)
     ) {
       throw new Error('active Service Worker does not expose the FWA kernel API')
     }

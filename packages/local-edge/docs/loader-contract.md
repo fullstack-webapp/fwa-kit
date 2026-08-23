@@ -10,6 +10,19 @@ The loader derives the scope, worker, descriptor, and control paths from its own
 
 Repeated execution does not create a second document runtime. The loader verifies that the controller exposes the expected Local Edge state endpoint before allowing it to manage releases.
 
+## Kernel compatibility
+
+The state response identifies both the worker path and the kernel protocol:
+
+```http
+X-FWA-Kernel: /__fwa-sw.js
+X-FWA-Kernel-Protocol: 1
+```
+
+The loader accepts a controlling worker only when both identities match. A missing or mismatched protocol follows the same guarded Service Worker replacement path as any incompatible controller.
+
+The kernel protocol version changes only when the document loader and worker can no longer communicate safely. It is independent of package versions and the release descriptor `schemaVersion`.
+
 ## Global facade
 
 The loader exposes `window.__fwa.localEdge`:

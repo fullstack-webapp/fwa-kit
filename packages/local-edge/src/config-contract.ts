@@ -31,9 +31,18 @@ export interface LocalEdgeControlPaths {
 export const localEdgeModeQueryParameter = '__fwa'
 export const localEdgeDebugQueryParameter = '__fwa_debug'
 export const fwaKernelProbeHeaderName = 'X-FWA-Kernel'
+export const fwaKernelProtocolHeaderName = 'X-FWA-Kernel-Protocol'
+export const fwaKernelProtocolVersion = 1
 export const fwaTakeoverMessageType = '__fwa:takeover'
 export type LocalEdgeNavigationMode = 'network' | 'reset'
 export type LocalEdgeDebugSeed = 'enable' | 'disable' | 'reset'
+
+export function fwaKernelIdentityHeadersFor(workerPath: string) {
+  return {
+    [fwaKernelProbeHeaderName]: workerPath,
+    [fwaKernelProtocolHeaderName]: String(fwaKernelProtocolVersion),
+  }
+}
 
 export function loaderPathFor(
   config: Pick<LocalEdgeConfig, 'controlPrefix'>,

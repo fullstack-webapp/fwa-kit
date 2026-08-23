@@ -56,6 +56,20 @@ export function deriveDebugInstallation(
   }
 
   if (evidence.activeRelease) {
+    if (evidence.serviceWorker.installing !== undefined) {
+      return diagnostic(
+        'updating',
+        'Updating',
+        'A newer Local Edge worker is installing',
+      )
+    }
+    if (evidence.serviceWorker.waiting !== undefined) {
+      return diagnostic(
+        'updating',
+        'Updating',
+        'A newer Local Edge worker is waiting to take over',
+      )
+    }
     return installedReleaseDiagnostic(evidence, evidence.activeRelease)
   }
 

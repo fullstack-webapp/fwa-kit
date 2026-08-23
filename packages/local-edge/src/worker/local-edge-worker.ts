@@ -1,6 +1,6 @@
 import { releaseAssetPaths } from '../release.ts'
 import {
-  fwaKernelProbeHeaderName,
+  fwaKernelIdentityHeadersFor,
   loaderPathFor,
   pathWithLocalEdgeNavigationMode,
   localEdgeConfig,
@@ -156,7 +156,7 @@ async function stateResponse(request: Request) {
   return Response.json(await getLocalEdgeSnapshot(), {
     headers: {
       'Cache-Control': 'no-store',
-      [fwaKernelProbeHeaderName]: localEdgeConfig.workerPath,
+      ...fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath),
     },
   })
 }

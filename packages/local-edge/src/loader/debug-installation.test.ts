@@ -53,6 +53,46 @@ describe('deriveDebugInstallation', () => {
     })
   })
 
+  it('shows Updating when a pending worker waits to replace an incomplete active release', () => {
+    expect(
+      deriveDebugInstallation({
+        ...installedEvidence,
+        caches: [],
+        serviceWorker: { supported: true, waiting: '/__fwa-sw.js' },
+      }),
+    ).toEqual({
+      detail: 'A newer Local Edge worker is waiting to take over',
+      label: 'Updating',
+      state: 'updating',
+    })
+  })
+
+  it('shows Updating when a worker is installing over an incomplete active release', () => {
+    expect(
+      deriveDebugInstallation({
+        ...installedEvidence,
+        caches: [],
+        serviceWorker: { supported: true, installing: '/__fwa-sw.js' },
+      }),
+    ).toMatchObject({
+      label: 'Updating',
+      state: 'updating',
+    })
+  })
+
+  it('keeps Incomplete for a missing active cache without a pending worker', () => {
+    expect(
+      deriveDebugInstallation({
+        ...installedEvidence,
+        caches: [],
+      }),
+    ).toEqual({
+      detail: 'Committed release cache is missing',
+      label: 'Incomplete',
+      state: 'incomplete',
+    })
+  })
+
   it('shows background revalidation while the current release stays available', () => {
     expect(
       deriveDebugInstallation({
