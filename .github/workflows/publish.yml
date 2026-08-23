@@ -60,5 +60,3 @@ jobs:
       - name: Publish Local Edge
         working-directory: packages/local-edge
         run: npm publish --access public --tag beta --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

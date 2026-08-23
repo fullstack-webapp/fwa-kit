@@ -33,7 +33,7 @@ pnpm test:packed-consumer
 
 `pnpm run ci` runs the public verification matrix used by pull requests. The explicit `run` is required because `pnpm ci` is pnpm's clean-install alias. Repository CI has read-only permissions and does not publish packages or deploy the demo.
 
-Package releases use independent versions and tags in the form `local-edge@<version>`. Publishing is intentionally outside the current bootstrap and is documented in [`docs/releasing.md`](docs/releasing.md).
+Package releases use independent versions and tags in the form `local-edge@<version>`. Tag-driven npm trusted publishing is documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Project policy
 
