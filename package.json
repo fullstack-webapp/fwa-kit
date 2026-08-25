@@ -13,6 +13,7 @@
     "test:hosting": "pnpm --filter @fullstack-webapp/local-edge-demo test:hosting",
     "pack:check": "pnpm --filter @fullstack-webapp/local-edge pack:check",
     "test:packed-consumer": "node packages/local-edge/scripts/verify-packed-consumer.mjs",
-    "ci": "pnpm lint && pnpm typecheck && pnpm test && pnpm e2e && pnpm test:hosting && pnpm pack:check && pnpm test:packed-consumer"
+    "test:release-version": "node --test scripts/validate-local-edge-release.test.mjs",
+    "ci": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:release-version && pnpm e2e && pnpm test:hosting && pnpm pack:check && pnpm test:packed-consumer"
   }
 }
