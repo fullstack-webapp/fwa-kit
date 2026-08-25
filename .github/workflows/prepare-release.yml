@@ -9,9 +9,7 @@ on:
         type: string
 
 permissions:
-  actions: write
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: prepare-local-edge-release
@@ -24,14 +22,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      GH_TOKEN: ${{ github.token }}
       VERSION: ${{ inputs.version }}
 
     steps:
+      - name: Create release bot token
+        id: release-bot-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FWA_KIT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.FWA_KIT_RELEASE_APP_PRIVATE_KEY }}
+
       - name: Checkout default branch
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ steps.release-bot-token.outputs.token }}
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -78,6 +83,8 @@ jobs:
           fi
 
       - name: Create release branch and pull request
+        env:
+          GH_TOKEN: ${{ steps.release-bot-token.outputs.token }}
         run: |
           set -euo pipefail
           branch="release/local-edge-$VERSION"
@@ -108,8 +115,4 @@ jobs:
             --base main \
             --head "$branch" \
             --title "chore: prepare local edge $VERSION" \
-            --body "Prepare \`@fullstack-webapp/local-edge@$VERSION\` from the current default branch. This PR changes only the package version claim. It does not publish, tag, or update consumers. The prepare workflow has checked SemVer precedence, remote branch/tag absence, and npm version absence; CI is dispatched for this release branch head."
-
-      - name: Dispatch release-branch CI
-        run: |
-          gh workflow run ci.yml --ref "release/local-edge-$VERSION"
+            --body "Prepare \`@fullstack-webapp/local-edge@$VERSION\` from the current default branch. This PR changes only the package version claim. It does not publish, tag, or update consumers. The prepare workflow has checked SemVer precedence, remote branch/tag absence, and npm version absence."
