@@ -22,7 +22,7 @@ Before a release is enabled:
 4. Publish only `packages/local-edge/` with public npm access.
 5. Confirm npm provenance and anonymous installation, then record the published version, tag, package URL, and workflow evidence in the GitHub release.
 
-Start from the protected default branch with the **Prepare Local Edge release** workflow. It accepts one exact version, rejects an invalid or non-incrementing claim, an existing branch or tag, and a version already present in npm. It then creates a release branch and pull request containing only the package version claim, and explicitly dispatches the repository CI for that branch head. The release PR still needs its normal review and approval; it does not publish, tag, or update consumers.
+Start from the protected default branch with the **Prepare Local Edge release** workflow. It uses the repository-scoped release bot to reject an invalid or non-incrementing claim, an existing branch or tag, and a version already present in npm. It then creates a release branch and pull request containing only the package version claim. The release PR triggers the normal repository CI and still needs its normal review and approval; it does not publish, tag, or update consumers.
 
 After the release PR has merged, create a release tag only from the current protected `main` revision:
 
