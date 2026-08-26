@@ -19,7 +19,7 @@ coordinates lifecycle; it cannot make two independently styled tab bars match.
 ## 1. Install and create the sentinel
 
 ```sh
-pnpm add -D @fullstack-webapp/document-shell@beta
+pnpm add -D @fullstack-webapp/document-shell
 ```
 
 Replace the checked-in `index.html` with only the Vite module entry and the

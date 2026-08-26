@@ -46,7 +46,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "beta"
+    "tag": "latest"
   },
   "peerDependencies": {
     "vite": ">=7 <9"

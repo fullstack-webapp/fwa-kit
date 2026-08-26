@@ -20,7 +20,7 @@ projection rather than SSR: the consumer retains its renderer, markup, critical
 CSS, manifest values, and framework lifecycle.
 
 ```sh
-pnpm add -D @fullstack-webapp/document-shell@beta
+pnpm add -D @fullstack-webapp/document-shell
 ```
 
 Start with the [package README](packages/document-shell/README.md), then follow

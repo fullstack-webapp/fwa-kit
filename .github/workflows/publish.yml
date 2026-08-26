@@ -87,4 +87,4 @@ jobs:
 
       - name: Publish ${{ steps.package.outputs.name }}
         working-directory: ${{ steps.package.outputs.directory }}
-        run: npm publish --access public --tag beta --provenance
+        run: npm publish --access public --tag latest --provenance
