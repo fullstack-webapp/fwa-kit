@@ -58,7 +58,7 @@ export const safeAreaCompatibilityProfiles = [
     devicePixelRatio: 3,
     reserve: { bottom: 34 },
     maturity: 'verified',
-    rollout: 'referenceProduction',
+    rollout: 'sharedDefault',
   },
   {
     id: 'ios-430x932-3x-portrait-standalone',

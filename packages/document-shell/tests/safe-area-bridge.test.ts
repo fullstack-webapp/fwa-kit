@@ -120,14 +120,25 @@ function runBridge(
   }
 }
 
-test('keeps reference-production profiles out of the shared default projection', () => {
+test('projects only the verified shared-default profile through the root entry', () => {
   const projection = createSafeAreaBridge({ domEffect })
 
   assert.doesNotMatch(projection.beforePaint, /ios-375x812-3x-portrait-standalone/)
   assert.doesNotMatch(projection.beforePaint, /ios-393x852-3x-portrait-standalone/)
-  assert.doesNotMatch(projection.beforePaint, /ios-402x874-3x-portrait-standalone/)
+  assert.match(projection.beforePaint, /ios-402x874-3x-portrait-standalone/)
   assert.doesNotMatch(projection.beforePaint, /ios-430x932-3x-portrait-standalone/)
-  assert.match(projection.beforePaint, /const profiles = \[\]/)
+  assert.doesNotMatch(projection.beforePaint, /"maturity":/)
+  assert.doesNotMatch(projection.beforePaint, /"rollout":/)
+})
+
+test('applies the verified shared-default reserve before native inset stability', () => {
+  const runtime = runBridge(createSafeAreaBridge({ domEffect }), [])
+
+  assert.equal(runtime.properties.get('--consumer-safe-area-bottom'), '34px')
+  assert.equal(
+    runtime.attributes.get('data-consumer-safe-area-profile'),
+    'ios-402x874-3x-portrait-standalone',
+  )
 })
 
 test('projects reference profiles and a bounded release sampler through the reference entry', () => {
