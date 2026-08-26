@@ -48,6 +48,25 @@ importers:
         specifier: 4.114.0
         version: 4.114.0
 
+  packages/document-shell:
+    dependencies:
+      parse5:
+        specifier: ^8.0.1
+        version: 8.0.1
+    devDependencies:
+      '@types/node':
+        specifier: ^24.12.3
+        version: 24.13.3
+      oxlint:
+        specifier: ^1.71.0
+        version: 1.75.0
+      typescript:
+        specifier: ~6.0.2
+        version: 6.0.3
+      vite:
+        specifier: ^8.0.12
+        version: 8.1.5(@types/node@24.13.3)(esbuild@0.28.1)
+
   packages/local-edge:
     devDependencies:
       '@types/node':
@@ -795,6 +814,10 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
+  entities@8.0.0:
+    resolution: {integrity: sha512-zwfzJecQ/Uej6tusMqwAqU/6KL2XaB2VZ2Jg54Je6ahNBGNH6Ek6g3jjNCF0fG9EWQKGZNddNjU5F1ZQn/sBnA==}
+    engines: {node: '>=20.19.0'}
+
   error-stack-parser-es@1.0.5:
     resolution: {integrity: sha512-5qucVt2XcuGMcEGgWI7i+yZpmpByQ8J1lHhcL7PwqCwu9FPP3VUXzT4ltHe5i2z9dePwEHcDVOAfSnHsOlCXRA==}
 
@@ -939,6 +962,9 @@ packages:
         optional: true
       vite-plus:
         optional: true
+
+  parse5@8.0.1:
+    resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
 
   path-to-regexp@6.3.0:
     resolution: {integrity: sha512-Yhpw4T9C6hPpgPeA28us07OJeqZ5EzQTkbfwuhsUg0c237RomFoETJgmp2sa3F/41gfLE6G5cqcYwznmeEeOlQ==}
@@ -1628,6 +1654,8 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
+  entities@8.0.0: {}
+
   error-stack-parser-es@1.0.5: {}
 
   es-module-lexer@2.3.1: {}
@@ -1769,6 +1797,10 @@ snapshots:
       '@oxlint/binding-win32-arm64-msvc': 1.75.0
       '@oxlint/binding-win32-ia32-msvc': 1.75.0
       '@oxlint/binding-win32-x64-msvc': 1.75.0
+
+  parse5@8.0.1:
+    dependencies:
+      entities: 8.0.0
 
   path-to-regexp@6.3.0: {}
 

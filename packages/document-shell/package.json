@@ -1,0 +1,68 @@
+{
+  "name": "@fullstack-webapp/document-shell",
+  "version": "0.0.0",
+  "description": "Parser-visible startup shell compiler, Vite HTML pipeline, and framework-neutral runtime handoff for web applications.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/document-shell.d.ts",
+      "import": "./dist/document-shell.js",
+      "default": "./dist/document-shell.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js",
+      "default": "./dist/client.js"
+    },
+    "./reference": {
+      "types": "./dist/reference.d.ts",
+      "import": "./dist/reference.js",
+      "default": "./dist/reference.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js",
+      "default": "./dist/vite.js"
+    }
+  },
+  "files": [
+    "dist/**",
+    "docs/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json",
+    "lint": "oxlint src tests scripts",
+    "prepack": "pnpm build",
+    "pack:check": "pnpm pack --dry-run",
+    "test:packed-consumer": "node scripts/verify-packed-consumer.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.build.json --noEmit"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  },
+  "peerDependencies": {
+    "vite": ">=7 <9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.3",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.12"
+  },
+  "dependencies": {
+    "parse5": "^8.0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fullstack-webapp/fwa-kit.git",
+    "directory": "packages/document-shell"
+  }
+}
