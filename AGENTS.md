@@ -25,7 +25,11 @@ FWA Kit is the public home for reusable Fullstack Web App building blocks. The r
 
 - Document Shell consumers use only its declared root, `./vite`, and `./client` exports. `./reference` preserves the reference application's accepted safe-area rollout during extraction; it is not a general consumer selector.
 - Document Shell owns compilation, transform ordering, final structural gates, runtime handoff, and profile acceptance. The consumer owns shell markup, critical CSS, global DOM-effect names, framework commit timing, manifest values, splash assets, and diagnostics.
-- Keep the public root's safe-area projection restricted to `sharedDefault`. A physical migration must not promote `referenceProduction` profiles or expose maturity/rollout choice as application configuration.
+- Keep the public root's safe-area projection restricted to package-owned
+  `sharedDefault` profiles. Maturity and rollout are independent: provisional
+  profiles may enter the shared default when their failure consequence is
+  bounded and accepted, but consumers must not choose maturity, rollout, or
+  individual profiles as application configuration.
 - Applications consume only `@fullstack-webapp/local-edge/vite` and `@fullstack-webapp/local-edge/client`. The package's loader and worker sources are bundled for consumers but are not deep-import APIs.
 - The package owns release verification, request interception, and Local Edge storage. A consuming application owns its business routes, APIs, authentication, data authority, and enablement policy.
 - The demo must consume published package exports; it must not use relative or deep imports into `packages/local-edge/src/`.
