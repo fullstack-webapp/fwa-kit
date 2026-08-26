@@ -167,11 +167,11 @@ checklist, and failure guide, see [Integration guide](docs/integration.md).
 | `@fullstack-webapp/document-shell/client` | The framework-neutral, one-shot runtime handoff. |
 | `@fullstack-webapp/document-shell/reference` | Reference-application safe-area rollout used to retain existing evidence while profiles mature; it is not a consumer profile selector. |
 
-The current beta catalog contains no `sharedDefault` profile. Therefore the
-root `createSafeAreaBridge()` deliberately emits an empty profile list today;
-ordinary consumers receive no inferred reserve. This makes unsupported startup
-geometry a visible no-op instead of silently adopting provisional values from
-the reference application.
+The current beta catalog projects the verified iOS standalone portrait
+`402×874@3x` profile through `sharedDefault`. Root consumers receive its `34px`
+startup bottom floor without selecting or copying the profile. The remaining
+provisional reference profiles stay excluded, so unsupported startup geometry
+remains a visible no-op.
 
 `./reference` is a pre-1.0 migration seam, not a second configuration model. It
 remains only while the source application switches from its incubated package

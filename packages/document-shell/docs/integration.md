@@ -250,10 +250,11 @@ Then consume the variable from both shell implementations:
 ```
 
 The root entry projects only profiles whose package-owned rollout is
-`sharedDefault`. The current beta may therefore emit an empty catalog on an
-ordinary consumer. This is intentional fail-open behavior, not a configuration
-error. Consumers cannot pass a model name, reserve value, maturity, or rollout
-policy. Promotion happens in the package after evidence review.
+`sharedDefault`. The current beta includes the verified iOS standalone portrait
+`402×874@3x` profile and excludes the remaining provisional reference profiles.
+Unsupported signatures still fail open. Consumers cannot pass a model name,
+reserve value, maturity, or rollout policy; promotion happens in the package
+after evidence review.
 
 `@fullstack-webapp/document-shell/reference` temporarily contains the source
 application's `referenceProduction` profiles so migration can preserve its
@@ -329,9 +330,10 @@ rather than adding delay to the handoff.
 
 ### Safe-area reserve is inactive
 
-No `sharedDefault` profile matched the observable runtime signature. This is
-the safe failure mode. Capture evidence before proposing a package profile; do
-not hard-code an application-side model table.
+No `sharedDefault` profile matched the observable runtime signature, or the
+runtime platform/version/display-mode tuple did not qualify. This is the safe
+failure mode. Capture evidence before proposing a package profile; do not
+hard-code an application-side model table.
 
 ### A diagnostics marker appears in production
 
