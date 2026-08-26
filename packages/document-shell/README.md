@@ -167,17 +167,19 @@ checklist, and failure guide, see [Integration guide](docs/integration.md).
 | `@fullstack-webapp/document-shell/client` | The framework-neutral, one-shot runtime handoff. |
 | `@fullstack-webapp/document-shell/reference` | Reference-application safe-area rollout used to retain existing evidence while profiles mature; it is not a consumer profile selector. |
 
-The current beta catalog projects the verified iOS standalone portrait
-`402×874@3x` profile through `sharedDefault`. Root consumers receive its `34px`
-startup bottom floor without selecting or copying the profile. The remaining
-provisional reference profiles stay excluded, so unsupported startup geometry
-remains a visible no-op.
+The current beta catalog projects all four accepted iOS standalone portrait
+profiles through `sharedDefault`: `375×812@3x`, `393×852@3x`, `402×874@3x`, and
+`430×932@3x`. Root consumers receive their `34px` startup bottom floor without
+selecting or copying a profile. Maturity remains independent: `402×874@3x` is
+`verified`, while the other three remain `provisional` and can be narrowed or
+revised as production evidence arrives. Unsupported geometry remains a visible
+no-op.
 
-`./reference` is a pre-1.0 migration seam, not a second configuration model. It
-remains only while the source application switches from its incubated package
-to the public package. Remove the subpath after every reference profile has
-either been promoted to `sharedDefault` or retired and the source application
-uses the root entry; that removal may be part of a beta breaking release.
+`./reference` is a pre-1.0 migration seam, not a second configuration model.
+All current profiles are now shared defaults, so the subpath projects the same
+catalog as the root entry. It remains temporarily for source compatibility with
+the reference application and can be removed in a later beta breaking release
+after that consumer switches to the root entry.
 
 ## Ownership boundary
 
@@ -205,9 +207,9 @@ an arbitrary callback with `Function#toString()`.
 - Document Shell validates exactly one viewport meta, manifest link, title,
   mount point, critical-shell style, static-shell marker, and module entry.
 - The shared safe-area entry only emits profiles promoted to `sharedDefault`;
-  the current catalog emits only the verified `402×874@3x` profile. Provisional
-  reference-only profiles never enter ordinary consumer bytes. Consumers do
-  not choose individual device profiles or rollout maturity.
+  the current catalog emits all four accepted portrait profiles while retaining
+  their verified or provisional maturity. Consumers do not choose individual
+  device profiles or rollout maturity.
 - The current safe-area runtime matches observable browser geometry and
   platform signals, not marketing device names. Unsupported geometry fails
   open and receives no reserve.

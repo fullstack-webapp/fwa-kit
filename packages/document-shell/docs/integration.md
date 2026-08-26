@@ -250,18 +250,19 @@ Then consume the variable from both shell implementations:
 ```
 
 The root entry projects only profiles whose package-owned rollout is
-`sharedDefault`. The current beta includes the verified iOS standalone portrait
-`402×874@3x` profile and excludes the remaining provisional reference profiles.
-Unsupported signatures still fail open. Consumers cannot pass a model name,
-reserve value, maturity, or rollout policy; promotion happens in the package
+`sharedDefault`. The current beta includes all four accepted iOS standalone
+portrait profiles. Their maturity remains distinct: one is verified and three
+are provisional, but all receive the same bounded production rollout because a
+wrong startup floor has a low and reversible visual consequence. Unsupported
+signatures still fail open. Consumers cannot pass a model name, reserve value,
+maturity, or rollout policy; narrowing or promotion happens in the package
 after evidence review.
 
-`@fullstack-webapp/document-shell/reference` temporarily contains the source
-application's `referenceProduction` profiles so migration can preserve its
-already verified behavior without silently enabling those provisional values
-for every consumer. New applications should not import that subpath. It exits
-after those profiles are promoted or retired and the source application can use
-the root entry.
+`@fullstack-webapp/document-shell/reference` is a temporary source-compatibility
+entry for the reference application. The current catalog has no
+`referenceProduction`-only profile, so this subpath projects the same profiles
+as the root entry. New applications should not import it; it exits after the
+reference application migrates to the root entry.
 
 When a reserve matches, the bridge writes the declared CSS variable before
 paint. It removes the reserve after the native inset reaches the profile floor
