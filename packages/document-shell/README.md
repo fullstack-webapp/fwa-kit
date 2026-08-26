@@ -205,8 +205,8 @@ an arbitrary callback with `Function#toString()`.
 - Document Shell validates exactly one viewport meta, manifest link, title,
   mount point, critical-shell style, static-shell marker, and module entry.
 - The shared safe-area entry only emits profiles promoted to `sharedDefault`;
-  the current catalog has none, so the root bridge is intentionally inactive.
-  Reference-only profiles never enter ordinary consumer bytes. Consumers do
+  the current catalog emits only the verified `402×874@3x` profile. Provisional
+  reference-only profiles never enter ordinary consumer bytes. Consumers do
   not choose individual device profiles or rollout maturity.
 - The current safe-area runtime matches observable browser geometry and
   platform signals, not marketing device names. Unsupported geometry fails
