@@ -68,9 +68,8 @@
     "build:sdk": "vite build --config vite.sdk.config.ts && vite build --config vite.client-sdk.config.ts",
     "lint": "oxlint --ignore-pattern dist-sdk",
     "typecheck": "tsc -p tsconfig.json --pretty false && tsc -p tsconfig.node.json --pretty false && tsc -p tsconfig.worker.json --pretty false",
-    "test": "vitest run --config vitest.config.ts src && pnpm test:build && pnpm test:release && pnpm test:sdk",
+    "test": "vitest run --config vitest.config.ts src && pnpm test:build && pnpm test:sdk",
     "test:build": "node --test src/build/*.node-test.mjs",
-    "test:release": "node --test scripts/*.node-test.mjs",
     "test:sdk": "pnpm build:sdk && node scripts/verify-sdk-entry.mjs",
     "prepack": "pnpm build:sdk && node scripts/verify-sdk-entry.mjs",
     "pack:check": "pnpm pack --dry-run"

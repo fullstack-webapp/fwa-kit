@@ -1,10 +1,17 @@
-name: Prepare Local Edge release
+name: Prepare release
 
 on:
   workflow_dispatch:
     inputs:
+      package:
+        description: Package to release (local-edge or document-shell)
+        required: true
+        type: choice
+        options:
+          - local-edge
+          - document-shell
       version:
-        description: Exact next @fullstack-webapp/local-edge version
+        description: Exact next package version
         required: true
         type: string
 
@@ -12,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: prepare-local-edge-release
+  group: prepare-release-${{ inputs.package }}
   cancel-in-progress: false
 
 jobs:
@@ -21,8 +28,6 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      VERSION: ${{ inputs.version }}
 
     steps:
       - name: Create release bot token
@@ -45,13 +50,38 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - name: Validate release claim and availability
+      - name: Resolve release package
+        id: package
         run: |
           set -euo pipefail
-          node scripts/validate-local-edge-release.mjs "$VERSION"
+          case "${{ inputs.package }}" in
+            local-edge)
+              echo "key=local-edge" >> "$GITHUB_OUTPUT"
+              echo "name=@fullstack-webapp/local-edge" >> "$GITHUB_OUTPUT"
+              echo "directory=packages/local-edge" >> "$GITHUB_OUTPUT"
+              ;;
+            document-shell)
+              echo "key=document-shell" >> "$GITHUB_OUTPUT"
+              echo "name=@fullstack-webapp/document-shell" >> "$GITHUB_OUTPUT"
+              echo "directory=packages/document-shell" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unknown release package: ${{ inputs.package }}" >&2
+              exit 1
+              ;;
+          esac
 
-          branch="release/local-edge-$VERSION"
-          tag="local-edge@$VERSION"
+      - name: Validate release claim and availability
+        env:
+          PACKAGE: ${{ steps.package.outputs.key }}
+          VERSION: ${{ inputs.version }}
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+        run: |
+          set -euo pipefail
+          node scripts/validate-release.mjs "$PACKAGE" "$VERSION"
+
+          branch="release/$PACKAGE-$VERSION"
+          tag="$PACKAGE@$VERSION"
 
           branch_ref="$(git ls-remote --heads origin "refs/heads/$branch")"
           if [ -n "$branch_ref" ]; then
@@ -66,7 +96,7 @@ jobs:
           fi
 
           set +e
-          npm view "@fullstack-webapp/local-edge@$VERSION" version --json > registry-result.txt 2>&1
+          npm view "$PACKAGE_NAME@$VERSION" version --json > registry-result.txt 2>&1
           registry_status=$?
           set -e
 
@@ -85,16 +115,19 @@ jobs:
       - name: Create release branch and pull request
         env:
           GH_TOKEN: ${{ steps.release-bot-token.outputs.token }}
+          PACKAGE: ${{ steps.package.outputs.key }}
+          VERSION: ${{ inputs.version }}
+          DIRECTORY: ${{ steps.package.outputs.directory }}
         run: |
           set -euo pipefail
-          branch="release/local-edge-$VERSION"
+          branch="release/$PACKAGE-$VERSION"
           (
-            cd packages/local-edge
+            cd "$DIRECTORY"
             npm version "$VERSION" --no-git-tag-version --ignore-scripts --workspaces=false
           )
           git diff --check
 
-          if [ "$(git diff --name-only)" != 'packages/local-edge/package.json' ]; then
+          if [ "$(git diff --name-only)" != "$DIRECTORY/package.json" ]; then
             echo 'Release preparation changed files other than the package version claim.' >&2
             git diff --name-only >&2
             exit 1
@@ -103,16 +136,16 @@ jobs:
           git switch -c "$branch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add packages/local-edge/package.json
+          git add "$DIRECTORY/package.json"
           git diff --cached --quiet && {
             echo 'Release claim did not change package metadata.' >&2
             exit 1
           }
-          git commit -m "chore: prepare local edge $VERSION"
+          git commit -m "chore: prepare $PACKAGE $VERSION"
           git push origin "HEAD:refs/heads/$branch"
 
           gh pr create \
             --base main \
             --head "$branch" \
-            --title "chore: prepare local edge $VERSION" \
-            --body "Prepare \`@fullstack-webapp/local-edge@$VERSION\` from the current default branch. This PR changes only the package version claim. It does not publish, tag, or update consumers. The prepare workflow has checked SemVer precedence, remote branch/tag absence, and npm version absence."
+            --title "chore: prepare $PACKAGE $VERSION" \
+            --body "Prepare \`$PACKAGE@$VERSION\` from the current default branch. This PR changes only the package version claim. It does not publish, tag, or update consumers. The prepare workflow has checked SemVer precedence, remote branch/tag absence, and npm version absence."

@@ -5,15 +5,15 @@
   "scripts": {
     "dev": "pnpm --filter @fullstack-webapp/local-edge-demo dev",
     "build:sdk": "pnpm --filter @fullstack-webapp/local-edge build:sdk",
-    "build": "pnpm build:sdk && pnpm --filter @fullstack-webapp/local-edge-demo build",
+    "build": "pnpm build:sdk && pnpm --filter @fullstack-webapp/document-shell build && pnpm --filter @fullstack-webapp/local-edge-demo build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm build:sdk && pnpm -r typecheck",
-    "test": "pnpm --filter @fullstack-webapp/local-edge test",
+    "test": "pnpm --filter @fullstack-webapp/local-edge test && pnpm --filter @fullstack-webapp/document-shell test",
     "e2e": "pnpm --filter @fullstack-webapp/local-edge-demo e2e",
     "test:hosting": "pnpm --filter @fullstack-webapp/local-edge-demo test:hosting",
-    "pack:check": "pnpm --filter @fullstack-webapp/local-edge pack:check",
-    "test:packed-consumer": "node packages/local-edge/scripts/verify-packed-consumer.mjs",
-    "test:release-version": "node --test scripts/validate-local-edge-release.test.mjs",
+    "pack:check": "pnpm --filter @fullstack-webapp/local-edge pack:check && pnpm --filter @fullstack-webapp/document-shell pack:check",
+    "test:packed-consumer": "node packages/local-edge/scripts/verify-packed-consumer.mjs && pnpm --filter @fullstack-webapp/document-shell test:packed-consumer",
+    "test:release-version": "node --test scripts/validate-release.test.mjs",
     "ci": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:release-version && pnpm e2e && pnpm test:hosting && pnpm pack:check && pnpm test:packed-consumer"
   }
 }

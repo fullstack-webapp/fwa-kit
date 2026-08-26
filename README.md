@@ -1,14 +1,30 @@
 # FWA Kit
 
-FWA Kit is the open-source home for reusable Fullstack Web App building blocks. Its first package, **FWA Local Edge**, lets a static web application prepare and activate complete browser-side code releases while keeping request ownership explicit and recovery network-resilient.
+FWA Kit is the open-source home for reusable Fullstack Web App building blocks. It currently provides a parser-visible startup shell for smooth first paint and a browser-side Local Edge for atomic code releases and network-resilient recovery.
 
-Local Edge places a device-local edge between the document and the network. It does not move application authentication, business authority, secrets, or backend data into the browser.
+Both packages stay below application policy. Document Shell does not own route content or interaction, and Local Edge does not move authentication, business authority, secrets, or backend data into the browser.
 
 ## Packages
 
 | Package | Purpose | Executable demo |
 | --- | --- | --- |
+| [`@fullstack-webapp/document-shell`](packages/document-shell/README.md) | Build-time document projection and framework-neutral runtime handoff for a stable first screen | Isolated packed Vite consumer in CI; application demo remains a later package consumer |
 | [`@fullstack-webapp/local-edge`](packages/local-edge/README.md) | Framework-neutral Local Edge integration for Vite applications | [`local-edge-demo`](apps/local-edge-demo/README.md) |
+
+### FWA Document Shell
+
+`@fullstack-webapp/document-shell` compiles an application-owned static shell
+into Vite's final `index.html`, keeps it visible while framework resources load,
+and removes it after the real application shell commits. It is build-time
+projection rather than SSR: the consumer retains its renderer, markup, critical
+CSS, manifest values, and framework lifecycle.
+
+```sh
+pnpm add -D @fullstack-webapp/document-shell@beta
+```
+
+Start with the [package README](packages/document-shell/README.md), then follow
+the [file-by-file integration guide](packages/document-shell/docs/integration.md).
 
 ### FWA Local Edge
 
@@ -41,7 +57,9 @@ The project is in pre-release development. Public APIs and serialized contracts 
 
 | Need | Entry |
 | --- | --- |
-| Integrate the package | [`@fullstack-webapp/local-edge`](packages/local-edge/README.md) |
+| Integrate Local Edge | [`@fullstack-webapp/local-edge`](packages/local-edge/README.md) |
+| Remove startup white frames with a parser-visible shell | [`@fullstack-webapp/document-shell`](packages/document-shell/README.md) |
+| Connect Document Shell file by file | [Document Shell integration guide](packages/document-shell/docs/integration.md) |
 | Understand runtime owners and dependency direction | [Architecture](packages/local-edge/docs/architecture.md) |
 | Configure build-time paths and host ownership | [Configuration contract](packages/local-edge/docs/config-contract.md) |
 | Understand the loader, client facade, navigation, or request ownership | [Package documentation](packages/local-edge/README.md#documentation) |
@@ -58,7 +76,7 @@ pnpm run ci
 
 `pnpm run ci` is the public verification matrix used by pull requests. It runs linting, type checks, package tests, Chromium lifecycle tests, hosting checks, package-content checks, and an isolated packed consumer. Repository CI has read-only permissions and does not publish packages or deploy the demo.
 
-Packages use independent versions and tags in the form `local-edge@<version>`. Tag-driven npm trusted publishing is documented in [`docs/releasing.md`](docs/releasing.md).
+Packages use independent versions and tags in the form `<package-slug>@<version>`, currently `local-edge@<version>` and `document-shell@<version>`. Tag-driven npm trusted publishing is documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Contributing
 

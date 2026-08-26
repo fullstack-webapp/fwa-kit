@@ -49,6 +49,9 @@ jobs:
       - name: Test SDK and package boundaries
         run: pnpm test
 
+      - name: Test release package mapping
+        run: pnpm test:release-version
+
       - name: Build and test browser lifecycle
         run: pnpm e2e
 
