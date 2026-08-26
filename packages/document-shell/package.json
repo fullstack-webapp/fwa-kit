@@ -1,6 +1,6 @@
 {
   "name": "@fullstack-webapp/document-shell",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "description": "Parser-visible startup shell compiler, Vite HTML pipeline, and framework-neutral runtime handoff for web applications.",
   "license": "MIT",
   "type": "module",
@@ -46,7 +46,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "beta"
+    "tag": "latest"
   },
   "peerDependencies": {
     "vite": ">=7 <9"

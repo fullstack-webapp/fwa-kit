@@ -27,7 +27,7 @@ results, or interactive state that cannot be known while building the HTML.
 ## Install
 
 ```sh
-pnpm add -D @fullstack-webapp/document-shell@beta
+pnpm add -D @fullstack-webapp/document-shell
 ```
 
 Document Shell supports Vite 7 and 8. It emits standard ESM and declarations;

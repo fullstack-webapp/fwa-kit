@@ -1,6 +1,6 @@
 {
   "name": "@fullstack-webapp/local-edge",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0-beta.4",
   "description": "Browser-side runtime for atomic web app code releases, explicit request ownership, network-resilient startup, updates, and recovery.",
   "license": "MIT",
   "type": "module",
@@ -61,7 +61,7 @@
   ],
   "publishConfig": {
     "access": "public",
-    "tag": "beta"
+    "tag": "latest"
   },
   "scripts": {
     "build": "pnpm build:sdk",
