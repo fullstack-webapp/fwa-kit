@@ -34,7 +34,7 @@ export const safeAreaCompatibilityProfiles = [
     devicePixelRatio: 3,
     reserve: { bottom: 34 },
     maturity: 'provisional',
-    rollout: 'referenceProduction',
+    rollout: 'sharedDefault',
   },
   {
     id: 'ios-393x852-3x-portrait-standalone',
@@ -46,7 +46,7 @@ export const safeAreaCompatibilityProfiles = [
     devicePixelRatio: 3,
     reserve: { bottom: 34 },
     maturity: 'provisional',
-    rollout: 'referenceProduction',
+    rollout: 'sharedDefault',
   },
   {
     id: 'ios-402x874-3x-portrait-standalone',
@@ -70,6 +70,6 @@ export const safeAreaCompatibilityProfiles = [
     devicePixelRatio: 3,
     reserve: { bottom: 34 },
     maturity: 'provisional',
-    rollout: 'referenceProduction',
+    rollout: 'sharedDefault',
   },
 ] satisfies SafeAreaCompatibilityProfile[]

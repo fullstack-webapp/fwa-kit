@@ -120,13 +120,13 @@ function runBridge(
   }
 }
 
-test('projects only the verified shared-default profile through the root entry', () => {
+test('projects every accepted portrait profile through the root entry', () => {
   const projection = createSafeAreaBridge({ domEffect })
 
-  assert.doesNotMatch(projection.beforePaint, /ios-375x812-3x-portrait-standalone/)
-  assert.doesNotMatch(projection.beforePaint, /ios-393x852-3x-portrait-standalone/)
+  assert.match(projection.beforePaint, /ios-375x812-3x-portrait-standalone/)
+  assert.match(projection.beforePaint, /ios-393x852-3x-portrait-standalone/)
   assert.match(projection.beforePaint, /ios-402x874-3x-portrait-standalone/)
-  assert.doesNotMatch(projection.beforePaint, /ios-430x932-3x-portrait-standalone/)
+  assert.match(projection.beforePaint, /ios-430x932-3x-portrait-standalone/)
   assert.doesNotMatch(projection.beforePaint, /"maturity":/)
   assert.doesNotMatch(projection.beforePaint, /"rollout":/)
 })
