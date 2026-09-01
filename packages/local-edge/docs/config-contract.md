@@ -1,6 +1,6 @@
 # Build-time configuration and host ownership
 
-`fwa.config.json` is the single build-time source for paths, release ownership, and navigation ownership. Configuration is fixed during the build and is not replaced by remote runtime input.
+`fwa.config.json` is the single build-time source for paths, release ownership, navigation ownership, and scheduled update defaults. Configuration is fixed during the build and is not replaced by remote runtime input. A document may adjust its own update-check schedule through the client facade, but that override is neither persisted nor shared with later documents.
 
 ## Fields
 
@@ -19,6 +19,8 @@
 | `navigation.appPaths` | Exact app-owned navigation paths; must include `appEntry` |
 | `navigation.appPathPrefixes` | App-owned navigation subtrees ending in `/` |
 | `navigation.notFound` | `app-entry`, `network`, or a redirect to a declared app route |
+| `updateCheck.enabled` | Enables document-side scheduled release checks; defaults to `true` |
+| `updateCheck.intervalMinutes` | Positive integer minimum interval between checks; defaults to `5` |
 
 `supplementalAssetPaths` is intended for stable files such as a favicon or Web App Manifest. Each path must be unique, remain inside the scope, avoid control and application-request namespaces, and exist in the build output.
 
@@ -43,6 +45,24 @@ The `__fwa` query parameter is a transport namespace:
 - `__fwa_debug=1`, `0`, or `reset` manages same-origin diagnostics without changing request ownership.
 
 Unknown or repeated values do not change the active mode. Application routers and query parsers should treat these names as transport parameters rather than domain input.
+
+## Scheduled update checks
+
+The loader bundles the normalized `updateCheck` configuration. When enabled,
+the document checks for a release after returning to visible state, at the
+configured interval while visible, and after an `online` event. The minimum
+interval also applies after failures, which prevents visibility or network
+events from creating a retry loop.
+
+Scheduled checks are silent: they do not publish `revalidating` activity or
+replace the current message, and failures keep the last committed release
+without a warning. A newly committed candidate still sets `updateAvailable`
+and `availableReleaseId`; switching remains owned by the next navigation or
+`applyUpdate()`.
+
+`window.__fwa.localEdge.setUpdateCheck()` can enable, disable, or change the
+interval for the current document. This override is not written to browser
+storage and does not change `fwa.config.json`.
 
 ## Remote disable
 

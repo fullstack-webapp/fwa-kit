@@ -89,6 +89,9 @@ function createLoaderConfig(localEdgeConfig: LocalEdgeConfig): UserConfig {
 
   return {
     publicDir: false,
+    define: {
+      __FWA_LOCAL_EDGE_CONFIG__: JSON.stringify(localEdgeConfig),
+    },
     build: {
       emptyOutDir: false,
       lib: {

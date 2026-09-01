@@ -13,4 +13,5 @@ export type {
   LocalEdgeClientState,
   LocalEdgeRevalidationOutcome,
   LocalEdgeStateListener,
+  LocalEdgeUpdateCheckCommandConfig,
 } from './loader-contract.ts'
