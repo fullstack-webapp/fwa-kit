@@ -10,6 +10,7 @@ import {
   localEdgeDebugEnabledFor,
   localEdgeDebugSeedFor,
   localEdgeNavigationModeFor,
+  maxUpdateCheckIntervalMinutes,
   type LocalEdgeConfig,
 } from './config-contract.ts'
 
@@ -112,8 +113,15 @@ describe('defineLocalEdgeConfig', () => {
     })
   })
 
-  it('rejects an interval that is not a positive safe integer', () => {
-    for (const intervalMinutes of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+  it('rejects an interval outside the browser timer range', () => {
+    for (const intervalMinutes of [
+      0,
+      -1,
+      1.5,
+      Number.NaN,
+      maxUpdateCheckIntervalMinutes + 1,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
       expect(() =>
         defineLocalEdgeConfig({
           ...validConfig,

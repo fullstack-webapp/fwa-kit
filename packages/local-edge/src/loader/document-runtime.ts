@@ -4,6 +4,7 @@ import type {
 } from '../release.ts'
 import {
   defaultUpdateCheckIntervalMinutes,
+  isValidUpdateCheckIntervalMinutes,
   localEdgeControlPathsFor,
   fwaKernelProbeHeaderName,
   fwaKernelProtocolHeaderName,
@@ -249,7 +250,17 @@ export function createLocalEdgeDocumentRuntime(
       }
       return 'disabled' as const
     }
-    if (result.status !== 'current' && revalidationVisible) {
+    if (
+      !revalidationVisible &&
+      (result.status === 'installed' || result.status === 'enabled') &&
+      result.release
+    ) {
+      publishSnapshot({
+        localEdgeEnabled: true,
+        mode: 'active',
+        release: result.release,
+      })
+    } else if (result.status !== 'current' && revalidationVisible) {
       await readAndPublishSnapshot()
     }
     return result.status === 'disabled-current'
@@ -551,8 +562,7 @@ function normalizeUpdateCheck(
     defaultUpdateCheckIntervalMinutes
   if (
     typeof enabled !== 'boolean' ||
-    !Number.isSafeInteger(intervalMinutes) ||
-    intervalMinutes <= 0
+    !isValidUpdateCheckIntervalMinutes(intervalMinutes)
   ) {
     throw new TypeError('Local Edge update check config is invalid')
   }

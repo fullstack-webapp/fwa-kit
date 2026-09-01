@@ -98,7 +98,9 @@ unsubscribe?.()
 ```
 
 `setUpdateCheck()` changes only the current document. It does not persist an
-override or replace the build-time configuration for later documents.
+override or replace the build-time configuration for later documents. The
+interval must be an integer from 1 through 35,791 minutes so it remains within
+the browser timer range.
 
 The `window.__fwa` object and `__fwa` query namespace remain stable FWA protocol surfaces. The Local Edge facade and queue commands use the `localEdge` name.
 

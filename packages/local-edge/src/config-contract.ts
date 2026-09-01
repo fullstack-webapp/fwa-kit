@@ -44,6 +44,20 @@ export type LocalEdgeNavigationMode = 'network' | 'reset'
 export type LocalEdgeDebugSeed = 'enable' | 'disable' | 'reset'
 
 export const defaultUpdateCheckIntervalMinutes = 5
+export const maxUpdateCheckIntervalMinutes = Math.floor(
+  0x7fffffff / (60 * 1000),
+)
+
+export function isValidUpdateCheckIntervalMinutes(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= maxUpdateCheckIntervalMinutes
+  )
+}
 
 export function fwaKernelIdentityHeadersFor(workerPath: string) {
   return {
@@ -170,9 +184,7 @@ function parseUpdateCheckConfig(value: unknown): UpdateCheckConfig {
   if (
     (enabled !== undefined && typeof enabled !== 'boolean') ||
     (intervalMinutes !== undefined &&
-      (typeof intervalMinutes !== 'number' ||
-        !Number.isSafeInteger(intervalMinutes) ||
-        intervalMinutes <= 0))
+      !isValidUpdateCheckIntervalMinutes(intervalMinutes))
   ) {
     throw new Error('FWA Local Edge update check config is invalid')
   }

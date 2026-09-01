@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   fwaKernelProtocolHeaderName,
   fwaKernelProtocolVersion,
+  maxUpdateCheckIntervalMinutes,
 } from '../config-contract.ts'
 import {
   createLocalEdgeDocumentRuntime,
@@ -532,6 +533,64 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('publishes the first release installed by a scheduled check', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let installed = false
+      let revalidationCount = 0
+      const { runtime } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            return Response.json(
+              installed
+                ? {
+                    localEdgeEnabled: true,
+                    mode: 'active',
+                    release: { releaseId: 'release-a' },
+                  }
+                : { localEdgeEnabled: true, mode: 'network-only' },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidationCount += 1
+            if (revalidationCount === 1) {
+              return new Response('boom', { status: 503 })
+            }
+            installed = true
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-a' },
+              status: 'installed',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          revalidating: false,
+          updateAvailable: false,
+        })
+      })
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          controlled: true,
+          phase: 'ready',
+          releaseId: 'release-a',
+          revalidating: false,
+          updateAvailable: false,
+        })
+      })
+    })
+
     it('keeps the last known good release silent when a scheduled check fails', async () => {
       const fakeScheduler = createFakeScheduler()
       const { runtime, fetchMock } = createControlledKernel({
@@ -834,6 +893,22 @@ describe('createLocalEdgeDocumentRuntime', () => {
 
       runtime.setUpdateCheck({ enabled: false })
       expect(fakeScheduler.intervalCount()).toBe(0)
+    })
+
+    it('rejects runtime intervals that overflow browser timers', async () => {
+      const fakeScheduler = createFakeScheduler()
+      const { runtime } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+      })
+      await settle(runtime)
+
+      expect(() =>
+        runtime.setUpdateCheck({
+          intervalMinutes: maxUpdateCheckIntervalMinutes + 1,
+        }),
+      ).toThrow('Local Edge update check config is invalid')
+      expect(fakeScheduler.intervalCount()).toBe(1)
     })
 
     it('checks immediately when a shorter runtime interval is already due', async () => {

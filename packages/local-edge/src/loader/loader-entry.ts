@@ -3,6 +3,7 @@ import {
   fwaTakeoverMessageType,
   localEdgeConfig,
 } from '../config.ts'
+import { isValidUpdateCheckIntervalMinutes } from '../config-contract.ts'
 import { createFwaDebugRuntime } from './debug-runtime.ts'
 import {
   deriveFwaLoaderPaths,
@@ -213,8 +214,6 @@ function isUpdateCheckCommandConfig(
   return (
     (enabled === undefined || typeof enabled === 'boolean') &&
     (intervalMinutes === undefined ||
-      (typeof intervalMinutes === 'number' &&
-        Number.isSafeInteger(intervalMinutes) &&
-        intervalMinutes > 0))
+      isValidUpdateCheckIntervalMinutes(intervalMinutes))
   )
 }
