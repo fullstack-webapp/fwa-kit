@@ -25,6 +25,10 @@ export interface FwaLocalEdgeConfig {
       | { strategy: 'network' }
       | { strategy: 'redirect'; targetPath: string }
   }
+  updateCheck?: {
+    enabled?: boolean
+    intervalMinutes?: number
+  }
 }
 
 export declare function createFwaViteIntegration(

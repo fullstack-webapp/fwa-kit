@@ -28,6 +28,11 @@ export interface LocalEdgeClientState {
 
 export type LocalEdgeStateListener = (state: LocalEdgeClientState) => void
 
+export interface LocalEdgeUpdateCheckCommandConfig {
+  enabled?: boolean
+  intervalMinutes?: number
+}
+
 export type LocalEdgeRevalidationOutcome =
   | 'current'
   | 'updated'
@@ -52,6 +57,7 @@ export interface FwaLocalEdgeApi {
   getState(): LocalEdgeClientState
   subscribe(listener: LocalEdgeStateListener): () => void
   revalidate(): Promise<LocalEdgeRevalidationOutcome>
+  setUpdateCheck(updateCheck: LocalEdgeUpdateCheckCommandConfig): void
   applyUpdate(): boolean
   reset(): Promise<void>
   networkUrl(currentUrl?: string): string
@@ -62,6 +68,7 @@ export type FwaQueuedCommand =
   | readonly ['localEdge.getState', (state: LocalEdgeClientState) => void]
   | readonly ['localEdge.subscribe', LocalEdgeStateListener]
   | readonly ['localEdge.revalidate']
+  | readonly ['localEdge.setUpdateCheck', LocalEdgeUpdateCheckCommandConfig]
   | readonly ['localEdge.applyUpdate']
   | readonly ['localEdge.reset']
   | readonly ['localEdge.openNetwork']

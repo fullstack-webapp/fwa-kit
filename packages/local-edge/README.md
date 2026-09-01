@@ -46,9 +46,19 @@ Create `fwa.config.json`:
     "appPaths": ["/"],
     "appPathPrefixes": [],
     "notFound": { "strategy": "app-entry" }
+  },
+  "updateCheck": {
+    "enabled": true,
+    "intervalMinutes": 5
   }
 }
 ```
+
+`updateCheck` is optional. It defaults to an enabled five-minute check. The
+document checks after becoming visible, while it remains visibly open, and
+after the browser comes online. Scheduled checks prefetch a complete release
+without changing the current document or publishing periodic activity and
+failure messages.
 
 Use the Vite integration in the app, loader, and worker configs:
 
@@ -81,10 +91,16 @@ const unsubscribe = localEdge?.subscribe((state) => {
 })
 
 await localEdge?.revalidate()
+localEdge?.setUpdateCheck({ intervalMinutes: 10 })
 localEdge?.applyUpdate()
 await localEdge?.reset()
 unsubscribe?.()
 ```
+
+`setUpdateCheck()` changes only the current document. It does not persist an
+override or replace the build-time configuration for later documents. The
+interval must be an integer from 1 through 35,791 minutes so it remains within
+the browser timer range.
 
 The `window.__fwa` object and `__fwa` query namespace remain stable FWA protocol surfaces. The Local Edge facade and queue commands use the `localEdge` name.
 

@@ -37,6 +37,7 @@ const unsubscribe = localEdge?.subscribe((state) => {
 })
 
 await localEdge?.revalidate()
+localEdge?.setUpdateCheck({ enabled: true, intervalMinutes: 10 })
 localEdge?.applyUpdate()
 await localEdge?.reset()
 localEdge?.openNetwork()
@@ -49,6 +50,7 @@ unsubscribe?.()
 | `getState()` | Read the current document state |
 | `subscribe(listener)` | Emit immediately and on later state changes |
 | `revalidate()` | Check and install a candidate; return `current`, `updated`, `failed`, or `disabled` |
+| `setUpdateCheck(config)` | Change the enabled state or interval (1–35,791 minutes) for the current document without persistence |
 | `applyUpdate()` | Reload only when a complete update is available |
 | `reset()` | Clear Local Edge-owned state and enter network mode |
 | `networkUrl(url?)` | Preserve the URL while adding `__fwa=network` |
@@ -74,8 +76,8 @@ Commands may be queued before the loader executes:
 </script>
 ```
 
-Supported Local Edge commands mirror the facade methods: `localEdge.getState`, `localEdge.subscribe`, `localEdge.revalidate`, `localEdge.applyUpdate`, `localEdge.reset`, and `localEdge.openNetwork`. Diagnostics commands remain under `debug.*`.
+Supported Local Edge commands mirror the facade methods: `localEdge.getState`, `localEdge.subscribe`, `localEdge.revalidate`, `localEdge.setUpdateCheck`, `localEdge.applyUpdate`, `localEdge.reset`, and `localEdge.openNetwork`. Diagnostics commands remain under `debug.*`.
 
 ## Update state
 
-`releaseId` identifies the release running in the current document. `availableReleaseId` identifies a newer complete release. `updateAvailable` becomes true only after candidate verification and commit. Revalidation never refreshes the current document implicitly.
+`releaseId` identifies the release running in the current document. `availableReleaseId` identifies a newer complete release. `updateAvailable` becomes true only after candidate verification and commit. Revalidation never refreshes the current document implicitly. Scheduled revalidation leaves `revalidating` and `message` unchanged; explicit `revalidate()` retains its visible activity and error behavior.

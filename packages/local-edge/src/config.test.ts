@@ -3,16 +3,18 @@ import {
   fwaKernelIdentityHeadersFor,
   localEdgeControlPathsFor,
   defineLocalEdgeConfig,
+  defaultUpdateCheckIntervalMinutes,
   loaderPathFor,
   pathWithLocalEdgeNavigationMode,
   pathWithoutLocalEdgeNavigationMode,
   localEdgeDebugEnabledFor,
   localEdgeDebugSeedFor,
   localEdgeNavigationModeFor,
+  maxUpdateCheckIntervalMinutes,
   type LocalEdgeConfig,
 } from './config-contract.ts'
 
-const validConfig: LocalEdgeConfig = {
+const validConfig: Omit<LocalEdgeConfig, 'updateCheck'> = {
   appId: 'scoped-app',
   localEdgeEnabled: true,
   scopePath: '/app/',
@@ -63,6 +65,82 @@ describe('defineLocalEdgeConfig', () => {
     })
     expect(loaderPathFor(config)).toBe('/workspace/__edge/loader.js')
     expect(config.localEdgeEnabled).toBe(false)
+  })
+
+  it('defaults the scheduled update check to enabled every five minutes', () => {
+    const config = defineLocalEdgeConfig(validConfig)
+
+    expect(config.updateCheck).toEqual({
+      enabled: true,
+      intervalMinutes: defaultUpdateCheckIntervalMinutes,
+    })
+  })
+
+  it('keeps existing configs without the update check field valid', () => {
+    expect(() => defineLocalEdgeConfig(validConfig)).not.toThrow()
+    expect(defineLocalEdgeConfig(validConfig).updateCheck.enabled).toBe(true)
+  })
+
+  it('normalizes an explicit update check', () => {
+    const config = defineLocalEdgeConfig({
+      ...validConfig,
+      updateCheck: { enabled: false, intervalMinutes: 30 },
+    })
+
+    expect(config.updateCheck).toEqual({
+      enabled: false,
+      intervalMinutes: 30,
+    })
+  })
+
+  it('falls back per field when the update check is partially provided', () => {
+    const enabledConfig = defineLocalEdgeConfig({
+      ...validConfig,
+      updateCheck: { enabled: false },
+    })
+    expect(enabledConfig.updateCheck).toEqual({
+      enabled: false,
+      intervalMinutes: defaultUpdateCheckIntervalMinutes,
+    })
+
+    const intervalConfig = defineLocalEdgeConfig({
+      ...validConfig,
+      updateCheck: { intervalMinutes: 2 },
+    })
+    expect(intervalConfig.updateCheck).toEqual({
+      enabled: true,
+      intervalMinutes: 2,
+    })
+  })
+
+  it('rejects an interval outside the browser timer range', () => {
+    for (const intervalMinutes of [
+      0,
+      -1,
+      1.5,
+      Number.NaN,
+      maxUpdateCheckIntervalMinutes + 1,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      expect(() =>
+        defineLocalEdgeConfig({
+          ...validConfig,
+          updateCheck: { intervalMinutes },
+        }),
+      ).toThrow('FWA Local Edge update check config is invalid')
+    }
+  })
+
+  it('rejects invalid update check field types', () => {
+    expect(() =>
+      defineLocalEdgeConfig({
+        ...validConfig,
+        updateCheck: { enabled: 'yes' },
+      }),
+    ).toThrow('FWA Local Edge update check config is invalid')
+    expect(() =>
+      defineLocalEdgeConfig({ ...validConfig, updateCheck: null }),
+    ).toThrow('FWA Local Edge update check config must be an object')
   })
 
   it('allows the release descriptor inside the control namespace', () => {

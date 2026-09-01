@@ -16,6 +16,10 @@ const testConfig = {
     appPathPrefixes: [],
     notFound: { strategy: 'app-entry' },
   },
+  updateCheck: {
+    enabled: true,
+    intervalMinutes: 5,
+  },
 }
 
 export default defineConfig({

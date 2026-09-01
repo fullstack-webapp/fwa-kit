@@ -10,6 +10,12 @@ export interface LocalEdgeConfig {
   releaseAssetPrefixes: readonly string[]
   supplementalAssetPaths: readonly string[]
   navigation: NavigationConfig
+  updateCheck: UpdateCheckConfig
+}
+
+export interface UpdateCheckConfig {
+  enabled: boolean
+  intervalMinutes: number
 }
 
 export interface NavigationConfig {
@@ -36,6 +42,22 @@ export const fwaKernelProtocolVersion = 1
 export const fwaTakeoverMessageType = '__fwa:takeover'
 export type LocalEdgeNavigationMode = 'network' | 'reset'
 export type LocalEdgeDebugSeed = 'enable' | 'disable' | 'reset'
+
+export const defaultUpdateCheckIntervalMinutes = 5
+export const maxUpdateCheckIntervalMinutes = Math.floor(
+  0x7fffffff / (60 * 1000),
+)
+
+export function isValidUpdateCheckIntervalMinutes(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= maxUpdateCheckIntervalMinutes
+  )
+}
 
 export function fwaKernelIdentityHeadersFor(workerPath: string) {
   return {
@@ -67,6 +89,7 @@ export function defineLocalEdgeConfig(value: unknown): LocalEdgeConfig {
     releaseAssetPrefixes,
     supplementalAssetPaths,
     navigation,
+    updateCheck,
   } = value
   if (
     typeof appId !== 'string' ||
@@ -130,6 +153,7 @@ export function defineLocalEdgeConfig(value: unknown): LocalEdgeConfig {
     reservedPaths: [workerPath, descriptorPath],
     scopePath,
   })
+  const parsedUpdateCheck = parseUpdateCheckConfig(updateCheck)
 
   return {
     appId,
@@ -143,6 +167,30 @@ export function defineLocalEdgeConfig(value: unknown): LocalEdgeConfig {
     releaseAssetPrefixes: [...releaseAssetPrefixes],
     supplementalAssetPaths: [...supplementalAssetPaths],
     navigation: parsedNavigation,
+    updateCheck: parsedUpdateCheck,
+  }
+}
+
+function parseUpdateCheckConfig(value: unknown): UpdateCheckConfig {
+  if (value === undefined) {
+    return { enabled: true, intervalMinutes: defaultUpdateCheckIntervalMinutes }
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('FWA Local Edge update check config must be an object')
+  }
+
+  const { enabled, intervalMinutes } = value
+  if (
+    (enabled !== undefined && typeof enabled !== 'boolean') ||
+    (intervalMinutes !== undefined &&
+      !isValidUpdateCheckIntervalMinutes(intervalMinutes))
+  ) {
+    throw new Error('FWA Local Edge update check config is invalid')
+  }
+  return {
+    enabled: enabled ?? true,
+    intervalMinutes: intervalMinutes ?? defaultUpdateCheckIntervalMinutes,
   }
 }
 

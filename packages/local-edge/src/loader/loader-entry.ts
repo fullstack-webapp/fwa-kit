@@ -1,5 +1,9 @@
 import { createLocalEdgeDocumentRuntime } from './document-runtime.ts'
-import { fwaTakeoverMessageType } from '../config-contract.ts'
+import {
+  fwaTakeoverMessageType,
+  localEdgeConfig,
+} from '../config.ts'
+import { isValidUpdateCheckIntervalMinutes } from '../config-contract.ts'
 import { createFwaDebugRuntime } from './debug-runtime.ts'
 import {
   deriveFwaLoaderPaths,
@@ -31,31 +35,67 @@ function bootstrap(script: HTMLScriptElement) {
       window.location.origin,
     ),
   )
-  const runtime = createLocalEdgeDocumentRuntime(paths, {
-    registerServiceWorker: () =>
-      navigator.serviceWorker.register(paths.workerPath, {
-        scope: paths.scopePath,
-      }),
-    replaceServiceWorker: async () => {
-      const registrations = await navigator.serviceWorker.getRegistrations()
-      const ownedRegistrations = registrations.filter(
-        (registration) =>
-          new URL(registration.scope).pathname === paths.scopePath,
-      )
-      await Promise.all(
-        ownedRegistrations.map((registration) => registration.unregister()),
-      )
-      const registration = await navigator.serviceWorker.register(
-        paths.workerPath,
-        {
-          scope: paths.scopePath,
-        },
-      )
-      const pendingWorker = registration.installing ?? registration.waiting
-      pendingWorker?.postMessage({ type: fwaTakeoverMessageType })
-      return registration
+  const runtime = createLocalEdgeDocumentRuntime(
+    {
+      ...paths,
+      updateCheck: localEdgeConfig.updateCheck,
     },
-  })
+    {
+      registerServiceWorker: () =>
+        navigator.serviceWorker.register(paths.workerPath, {
+          scope: paths.scopePath,
+        }),
+      replaceServiceWorker: async () => {
+        const registrations = await navigator.serviceWorker.getRegistrations()
+        const ownedRegistrations = registrations.filter(
+          (registration) =>
+            new URL(registration.scope).pathname === paths.scopePath,
+        )
+        await Promise.all(
+          ownedRegistrations.map((registration) => registration.unregister()),
+        )
+        const registration = await navigator.serviceWorker.register(
+          paths.workerPath,
+          {
+            scope: paths.scopePath,
+          },
+        )
+        const pendingWorker = registration.installing ?? registration.waiting
+        pendingWorker?.postMessage({ type: fwaTakeoverMessageType })
+        return registration
+      },
+      scheduler: {
+        now: () => performance.now(),
+        isVisible: () => document.visibilityState === 'visible',
+        setInterval: (callback, intervalMs) =>
+          window.setInterval(callback, intervalMs),
+        clearInterval: (handle) => window.clearInterval(handle),
+        onVisibilityChange: (callback) => {
+          const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+              callback()
+            }
+          }
+          document.addEventListener(
+            'visibilitychange',
+            handleVisibilityChange,
+          )
+          return () => {
+            document.removeEventListener(
+              'visibilitychange',
+              handleVisibilityChange,
+            )
+          }
+        },
+        onOnline: (callback) => {
+          window.addEventListener('online', callback)
+          return () => {
+            window.removeEventListener('online', callback)
+          }
+        },
+      },
+    },
+  )
   let localEdge: FwaLocalEdgeApi
   const debug = createFwaDebugRuntime(() => localEdge)
   localEdge = Object.freeze({
@@ -64,6 +104,7 @@ function bootstrap(script: HTMLScriptElement) {
     getState: runtime.getState,
     subscribe: runtime.subscribe,
     revalidate: runtime.revalidate,
+    setUpdateCheck: runtime.setUpdateCheck,
     applyUpdate: runtime.applyUpdate,
     reset: runtime.reset,
     networkUrl: runtime.networkUrl,
@@ -131,6 +172,11 @@ function dispatchCommand(localEdgeApi: FwaLocalEdgeApi, command: unknown) {
     case 'localEdge.revalidate':
       void localEdgeApi.revalidate().catch(() => undefined)
       break
+    case 'localEdge.setUpdateCheck':
+      if (isUpdateCheckCommandConfig(argument)) {
+        localEdgeApi.setUpdateCheck(argument)
+      }
+      break
     case 'localEdge.applyUpdate':
       localEdgeApi.applyUpdate()
       break
@@ -156,4 +202,18 @@ function dispatchCommand(localEdgeApi: FwaLocalEdgeApi, command: unknown) {
       }
       break
   }
+}
+
+function isUpdateCheckCommandConfig(
+  value: unknown,
+): value is { enabled?: boolean; intervalMinutes?: number } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false
+  }
+  const { enabled, intervalMinutes } = value as Record<string, unknown>
+  return (
+    (enabled === undefined || typeof enabled === 'boolean') &&
+    (intervalMinutes === undefined ||
+      isValidUpdateCheckIntervalMinutes(intervalMinutes))
+  )
 }

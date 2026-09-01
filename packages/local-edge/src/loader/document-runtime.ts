@@ -3,6 +3,8 @@ import type {
   LocalEdgeSnapshot,
 } from '../release.ts'
 import {
+  defaultUpdateCheckIntervalMinutes,
+  isValidUpdateCheckIntervalMinutes,
   localEdgeControlPathsFor,
   fwaKernelProbeHeaderName,
   fwaKernelProtocolHeaderName,
@@ -14,12 +16,19 @@ import type {
   LocalEdgeClientState,
   LocalEdgeRevalidationOutcome,
   LocalEdgeStateListener,
+  LocalEdgeUpdateCheckCommandConfig,
 } from './loader-contract.ts'
 
 interface LocalEdgeDocumentConfig {
   scopePath: string
   workerPath: string
   controlPrefix: string
+  updateCheck?: LocalEdgeUpdateCheckConfig
+}
+
+export interface LocalEdgeUpdateCheckConfig {
+  enabled: boolean
+  intervalMinutes: number
 }
 
 interface LocalEdgeRegistrationOwner {
@@ -27,11 +36,26 @@ interface LocalEdgeRegistrationOwner {
   replaceServiceWorker(): Promise<ServiceWorkerRegistration>
 }
 
+export interface LocalEdgeDocumentScheduler {
+  now(): number
+  isVisible(): boolean
+  setInterval(callback: () => void, intervalMs: number): number
+  clearInterval(handle: number): void
+  onVisibilityChange(callback: () => void): () => void
+  onOnline(callback: () => void): () => void
+}
+
+interface LocalEdgeDocumentDependencies extends LocalEdgeRegistrationOwner {
+  scheduler: LocalEdgeDocumentScheduler
+}
+
 interface LocalEdgeDocumentRuntime {
   getState(): LocalEdgeClientState
   subscribe(listener: LocalEdgeStateListener): () => void
   start(): void
+  stop(): void
   revalidate(): Promise<LocalEdgeRevalidationOutcome>
+  setUpdateCheck(updateCheck: LocalEdgeUpdateCheckCommandConfig): void
   applyUpdate(): boolean
   reset(): Promise<void>
   networkUrl(currentUrl?: string): string
@@ -47,13 +71,48 @@ const initialState: LocalEdgeClientState = {
 
 export function createLocalEdgeDocumentRuntime(
   config: LocalEdgeDocumentConfig,
-  registrationOwner: LocalEdgeRegistrationOwner,
+  dependencies: LocalEdgeDocumentDependencies,
 ): LocalEdgeDocumentRuntime {
+  const registrationOwner = dependencies
+  const scheduler = dependencies.scheduler
   const controlPaths = localEdgeControlPathsFor(config)
   const listeners = new Set<LocalEdgeStateListener>()
   let state = initialState
   let started = false
+  let stopped = false
+  let scheduledChecksStarted = false
   let revalidationInFlight: Promise<LocalEdgeRevalidationOutcome> | undefined
+  let revalidationVisible = false
+  let revalidationIdleMessage: string | undefined
+  let revalidationActivityMessage: string | undefined
+  let updateCheck = config.updateCheck
+  let intervalHandle: number | undefined
+  let lastCheckAttemptAt: number | undefined
+  let unsubscribeVisibility: (() => void) | undefined
+  let unsubscribeOnline: (() => void) | undefined
+
+  const clearScheduledCheckTimer = () => {
+    if (intervalHandle === undefined) {
+      return
+    }
+    scheduler.clearInterval(intervalHandle)
+    intervalHandle = undefined
+  }
+
+  const scheduleScheduledCheckTimer = () => {
+    clearScheduledCheckTimer()
+    if (stopped || !scheduledChecksStarted || !updateCheck?.enabled) {
+      return
+    }
+    intervalHandle = scheduler.setInterval(
+      () => {
+        if (scheduler.isVisible()) {
+          maybeRevalidate()
+        }
+      },
+      updateCheck.intervalMinutes * 60 * 1000,
+    )
+  }
 
   const publish = (nextState: LocalEdgeClientState) => {
     state = nextState
@@ -152,34 +211,56 @@ export function createLocalEdgeDocumentRuntime(
     }
   }
 
-  const finishRevalidation = async () => {
+  const runRevalidation = async () => {
     const result = await requestRevalidation()
     if (!result) {
-      await readAndPublishSnapshot(
-        'Release revalidation failed; the last committed release remains active.',
-      )
+      if (revalidationVisible) {
+        await readAndPublishSnapshot(
+          'Release revalidation failed; the last committed release remains active.',
+        )
+      }
       return 'failed' as const
     }
     if (result.status === 'updated') {
       const availableReleaseId = result.release?.releaseId
       if (availableReleaseId && availableReleaseId !== state.releaseId) {
-        publish({
-          ...state,
-          phase: 'ready',
-          controlled: true,
-          availableReleaseId,
-          updateAvailable: true,
-          message:
-            '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。',
-        })
+        publish(
+          !revalidationVisible
+            ? {
+                ...state,
+                availableReleaseId,
+                updateAvailable: true,
+              }
+            : {
+                ...state,
+                phase: 'ready',
+                controlled: true,
+                availableReleaseId,
+                updateAvailable: true,
+                message:
+                  '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。',
+              },
+        )
         return 'updated' as const
       }
     }
     if (result.status === 'disabled') {
-      window.location.reload()
+      if (revalidationVisible) {
+        window.location.reload()
+      }
       return 'disabled' as const
     }
-    if (result.status !== 'current') {
+    if (
+      !revalidationVisible &&
+      (result.status === 'installed' || result.status === 'enabled') &&
+      result.release
+    ) {
+      publishSnapshot({
+        localEdgeEnabled: true,
+        mode: 'active',
+        release: result.release,
+      })
+    } else if (result.status !== 'current' && revalidationVisible) {
       await readAndPublishSnapshot()
     }
     return result.status === 'disabled-current'
@@ -187,30 +268,70 @@ export function createLocalEdgeDocumentRuntime(
       : ('current' as const)
   }
 
-  const revalidate = () => {
-    if (!revalidationInFlight) {
-      const idleMessage = state.message
-      const activityMessage = state.releaseId
-        ? '正在检查并下载新 release，当前版本继续可用…'
-        : '正在下载初始 release…'
-      publish({
-        ...state,
-        revalidating: true,
-        message: activityMessage,
-      })
-      revalidationInFlight = finishRevalidation().finally(() => {
-        if (state.revalidating) {
-          publish({
-            ...state,
-            revalidating: false,
-            message:
-              state.message === activityMessage ? idleMessage : state.message,
-          })
-        }
-        revalidationInFlight = undefined
-      })
+  const showRevalidationActivity = () => {
+    if (revalidationVisible) {
+      return
     }
+    revalidationVisible = true
+    revalidationIdleMessage = state.message
+    revalidationActivityMessage = state.releaseId
+      ? '正在检查并下载新 release，当前版本继续可用…'
+      : '正在下载初始 release…'
+    publish({
+      ...state,
+      revalidating: true,
+      message: revalidationActivityMessage,
+    })
+  }
+
+  const revalidate = (silent = false) => {
+    if (revalidationInFlight) {
+      if (!silent) {
+        showRevalidationActivity()
+      }
+      return revalidationInFlight
+    }
+
+    lastCheckAttemptAt = scheduler.now()
+    if (!silent) {
+      showRevalidationActivity()
+    }
+    revalidationInFlight = runRevalidation().finally(() => {
+      if (revalidationVisible && state.revalidating) {
+        publish({
+          ...state,
+          revalidating: false,
+          message:
+            state.message === revalidationActivityMessage
+              ? (revalidationIdleMessage ?? state.message)
+              : state.message,
+        })
+      }
+      revalidationInFlight = undefined
+      revalidationVisible = false
+      revalidationIdleMessage = undefined
+      revalidationActivityMessage = undefined
+    })
     return revalidationInFlight
+  }
+
+  const maybeRevalidate = () => {
+    if (
+      !scheduledChecksStarted ||
+      !updateCheck?.enabled ||
+      stopped ||
+      revalidationInFlight
+    ) {
+      return
+    }
+    if (
+      lastCheckAttemptAt !== undefined &&
+      scheduler.now() - lastCheckAttemptAt <
+        updateCheck.intervalMinutes * 60 * 1000
+    ) {
+      return
+    }
+    void revalidate(true).catch(publishRuntimeError)
   }
 
   const publishRuntimeError = (error: unknown) => {
@@ -298,10 +419,29 @@ export function createLocalEdgeDocumentRuntime(
     }
 
     await revalidate()
+    startScheduledChecks()
   }
 
   const handleControllerChange = () => {
     void readAndPublishSnapshot().catch(publishRuntimeError)
+  }
+
+  const handleVisibilityChange = () => {
+    maybeRevalidate()
+  }
+
+  const handleOnline = () => {
+    maybeRevalidate()
+  }
+
+  const startScheduledChecks = () => {
+    if (scheduledChecksStarted || stopped) {
+      return
+    }
+    scheduledChecksStarted = true
+    unsubscribeVisibility = scheduler.onVisibilityChange(handleVisibilityChange)
+    unsubscribeOnline = scheduler.onOnline(handleOnline)
+    scheduleScheduledCheckTimer()
   }
 
   const start = () => {
@@ -314,6 +454,29 @@ export function createLocalEdgeDocumentRuntime(
       handleControllerChange,
     )
     void startRuntime().catch(publishRuntimeError)
+  }
+
+  const stop = () => {
+    if (stopped) {
+      return
+    }
+    stopped = true
+    scheduledChecksStarted = false
+    navigator.serviceWorker?.removeEventListener(
+      'controllerchange',
+      handleControllerChange,
+    )
+    unsubscribeVisibility?.()
+    unsubscribeOnline?.()
+    clearScheduledCheckTimer()
+  }
+
+  const setUpdateCheck = (nextUpdateCheck: LocalEdgeUpdateCheckCommandConfig) => {
+    updateCheck = normalizeUpdateCheck(nextUpdateCheck, updateCheck)
+    scheduleScheduledCheckTimer()
+    if (updateCheck.enabled) {
+      maybeRevalidate()
+    }
   }
 
   const networkUrl = (currentUrl = window.location.href) =>
@@ -355,7 +518,9 @@ export function createLocalEdgeDocumentRuntime(
       return () => listeners.delete(listener)
     },
     start,
+    stop,
     revalidate,
+    setUpdateCheck,
     applyUpdate,
     reset,
     networkUrl,
@@ -384,6 +549,24 @@ function isLocalEdgeSnapshot(value: unknown): value is LocalEdgeSnapshot {
       snapshot.mode === 'disabled' ||
       snapshot.mode === 'network-only')
   )
+}
+
+function normalizeUpdateCheck(
+  value: LocalEdgeUpdateCheckCommandConfig,
+  current?: LocalEdgeUpdateCheckConfig,
+): LocalEdgeUpdateCheckConfig {
+  const enabled = value.enabled ?? current?.enabled ?? true
+  const intervalMinutes =
+    value.intervalMinutes ??
+    current?.intervalMinutes ??
+    defaultUpdateCheckIntervalMinutes
+  if (
+    typeof enabled !== 'boolean' ||
+    !isValidUpdateCheckIntervalMinutes(intervalMinutes)
+  ) {
+    throw new TypeError('Local Edge update check config is invalid')
+  }
+  return { enabled, intervalMinutes }
 }
 
 function takeoverStorageKey(workerPath: string) {
