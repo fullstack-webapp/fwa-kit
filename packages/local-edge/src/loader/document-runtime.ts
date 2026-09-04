@@ -218,18 +218,16 @@ export function createLocalEdgeDocumentRuntime(
   // available update. Settle publishes never touch the document-owned
   // `revalidating` flag and re-read the current state after the await, so a
   // revalidate() that started while the pull was in flight keeps its
-  // activity. A document opened through an explicit network open
-  // (?__fwa=network) stays on the network baseline by contract and only
-  // drops stale progress.
-  const publishSettledSnapshot = async () => {
-    const dropStaleProgress = (value: LocalEdgeClientState) => {
-      const { revalidationProgress: _dropped, ...rest } = value
-      void _dropped
-      return rest
-    }
-
+  // activity. Progress for the settled release is dropped; progress for an
+  // install that is still running — or reported by the fetched snapshot —
+  // survives the settle. A document opened through an explicit network open
+  // (?__fwa=network) stays on the network baseline by contract and drops
+  // progress without pulling the kernel.
+  const publishSettledSnapshot = async (settledReleaseId?: string) => {
     if (explicitNetworkOpen) {
-      publish(dropStaleProgress(state))
+      const { revalidationProgress: _dropped, ...rest } = state
+      void _dropped
+      publish(rest)
       return
     }
     const snapshot = await fetchKernelSnapshot()
@@ -244,12 +242,37 @@ export function createLocalEdgeDocumentRuntime(
       return
     }
 
-    const restState = dropStaleProgress(state)
+    // The settled release's progress is stale and must go; a newer
+    // install's progress belongs to a kernel-level install that may still
+    // be running and stays. When the fetched snapshot itself reports a
+    // running install, its value is the freshest kernel observation and
+    // wins (never regressing below what the document already shows).
+    const currentProgress = state.revalidationProgress
+    const settledProgress = snapshot.revalidation
+    const mergedProgress = settledProgress
+      ? (!currentProgress ||
+          currentProgress.releaseId !== settledProgress.releaseId ||
+          currentProgress.completedAssets <= settledProgress.completedAssets)
+        ? settledProgress
+        : currentProgress
+      : currentProgress &&
+          settledReleaseId &&
+          currentProgress.releaseId !== settledReleaseId
+        ? currentProgress
+        : undefined
+    const { revalidationProgress: _merged, ...restState } = state
+    void _merged
+    const publishSettled = (value: LocalEdgeClientState) => {
+      publish({
+        ...value,
+        ...(mergedProgress ? { revalidationProgress: mergedProgress } : undefined),
+      })
+    }
 
     if (snapshot.mode !== 'active') {
       const { releaseId: _droppedReleaseId, ...restWithoutReleaseId } = restState
       void _droppedReleaseId
-      publish({
+      publishSettled({
         ...restWithoutReleaseId,
         phase: 'network-only',
         controlled: true,
@@ -263,7 +286,7 @@ export function createLocalEdgeDocumentRuntime(
       return
     }
     if (!snapshot.release) {
-      publish({
+      publishSettled({
         ...restState,
         updateAvailable: false,
         availableReleaseId: undefined,
@@ -274,7 +297,7 @@ export function createLocalEdgeDocumentRuntime(
 
     const activeReleaseId = snapshot.release.releaseId
     if (!restState.releaseId) {
-      publish({
+      publishSettled({
         ...restState,
         phase: 'ready',
         controlled: true,
@@ -286,7 +309,7 @@ export function createLocalEdgeDocumentRuntime(
       return
     }
     if (restState.releaseId === activeReleaseId) {
-      publish({
+      publishSettled({
         ...restState,
         updateAvailable: false,
         availableReleaseId: undefined,
@@ -294,7 +317,7 @@ export function createLocalEdgeDocumentRuntime(
       return
     }
 
-    publish({
+    publishSettled({
       ...restState,
       phase: 'ready',
       controlled: true,
@@ -340,10 +363,22 @@ export function createLocalEdgeDocumentRuntime(
         // Announce from a fresh, ordered kernel observation rather than from
         // the response payload: a commit that landed in another tab while
         // this response was pending must not be overwritten by the older
-        // release this result carries.
-        settlePullChain = settlePullChain.then(() =>
-          publishSettledSnapshot().catch(publishRuntimeError),
-        )
+        // release this result carries. The public promise keeps its state
+        // semantics: the announcement is visible once await revalidate()
+        // resolves.
+        let releasePull!: () => void
+        settlePullChain = settlePullChain.then(async () => {
+          try {
+            await publishSettledSnapshot(availableReleaseId)
+          } catch (error) {
+            publishRuntimeError(error)
+          } finally {
+            releasePull()
+          }
+        })
+        await new Promise<void>((resolve) => {
+          releasePull = resolve
+        })
         return 'updated' as const
       }
     }
@@ -575,9 +610,13 @@ export function createLocalEdgeDocumentRuntime(
       payload.type === fwaRevalidationFailedMessageType
     ) {
       // Terminal pulls are serialized: an earlier settle response can never
-      // overwrite the result of a later terminal message.
+      // overwrite the result of a later terminal message. The settled release
+      // id lets the pull drop only that release's progress and keep the
+      // progress of an install that is still running.
+      const settledReleaseId =
+        typeof payload.releaseId === 'string' ? payload.releaseId : undefined
       settlePullChain = settlePullChain.then(() =>
-        publishSettledSnapshot().catch(publishRuntimeError),
+        publishSettledSnapshot(settledReleaseId).catch(publishRuntimeError),
       )
     }
   }

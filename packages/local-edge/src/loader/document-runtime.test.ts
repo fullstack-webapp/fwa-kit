@@ -1013,6 +1013,88 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('keeps progress from a newer install when a settle pull lands late', async () => {
+      let stateCall = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const releaseId = stateCall === 1 ? 'release-a' : 'release-b'
+            return Response.json(
+              { localEdgeEnabled: true, mode: 'active', release: { releaseId } },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-a' },
+              status: 'current',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      // A new install of release-c starts (and broadcasts progress) while
+      // the terminal pull for the older release-b is still in flight.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-c',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        releaseId: 'release-c',
+      })
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationCommittedMessageType,
+            releaseId: 'release-b',
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().updateAvailable).toBe(true)
+      })
+
+      // The settled release-b pull must not drop release-c's live progress.
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        releaseId: 'release-c',
+        completedAssets: 3,
+      })
+    })
+
+    it('resolves revalidate with the announcement already visible', async () => {
+      const { runtime } = createControlledKernel({
+        revalidationReleaseId: 'release-b',
+        revalidationStatus: 'updated',
+      })
+      await settle(runtime)
+
+      await runtime.revalidate()
+
+      // No waitFor: the public promise resolves only after the ordered
+      // announcement pull has published.
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+        revalidating: false,
+      })
+    })
+
     it('keeps a document-owned revalidate flag when a settle pull lands mid-revalidate', async () => {
       const { runtime, serviceWorker, fetchMock } = createControlledKernel({
         scheduledResponse: new Promise<Response>(() => {}),
