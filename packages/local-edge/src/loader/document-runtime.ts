@@ -211,6 +211,17 @@ export function createLocalEdgeDocumentRuntime(
     publishSnapshot(snapshot, warning)
   }
 
+  // All kernel-observation reads run on one ordered chain so an older
+  // fetch can never overwrite a newer observation: startup reads,
+  // controller-change reads, response-driven pulls, and terminal-message
+  // pulls share the same serialization.
+  const enqueueSnapshotRead = (warning?: string) => {
+    settlePullChain = settlePullChain.then(() =>
+      readAndPublishSnapshot(warning).catch(publishRuntimeError),
+    )
+    return settlePullChain
+  }
+
   // A kernel settle broadcast (commit or failure) reaches every controlled
   // window client, including the document whose own revalidate just settled.
   // The pull must not relabel the running document: keep the loaded releaseId
@@ -351,7 +362,7 @@ export function createLocalEdgeDocumentRuntime(
     const result = await requestRevalidation()
     if (!result) {
       if (revalidationVisible) {
-        await readAndPublishSnapshot(
+        await enqueueSnapshotRead(
           'Release revalidation failed; the last committed release remains active.',
         )
       }
@@ -399,7 +410,7 @@ export function createLocalEdgeDocumentRuntime(
         release: result.release,
       })
     } else if (result.status !== 'current' && revalidationVisible) {
-      await readAndPublishSnapshot()
+      await enqueueSnapshotRead()
     }
     return result.status === 'disabled-current'
       ? ('disabled' as const)
@@ -513,36 +524,56 @@ export function createLocalEdgeDocumentRuntime(
     }
 
     if (navigator.serviceWorker.controller) {
-      let snapshot: LocalEdgeSnapshot | undefined
-      try {
-        snapshot = await fetchKernelSnapshot()
-      } catch {
-        snapshot = undefined
-      }
+      // The startup read runs as the first task on the ordered observation
+      // chain: a commit that lands while this read is in flight enqueues
+      // its terminal pull behind it, so the older startup snapshot can
+      // never overwrite a newer observation.
+      let snapshotPublished = false
+      let startupError: unknown
+      await (settlePullChain = settlePullChain.then(async () => {
+        try {
+          let snapshot: LocalEdgeSnapshot | undefined
+          try {
+            snapshot = await fetchKernelSnapshot()
+          } catch {
+            snapshot = undefined
+          }
 
-      if (!snapshot) {
-        if (takeoverWasAttempted(config.workerPath)) {
-          throw new Error(
-            'FWA kernel API is still unavailable after Service Worker takeover',
-          )
+          if (!snapshot) {
+            if (takeoverWasAttempted(config.workerPath)) {
+              throw new Error(
+                'FWA kernel API is still unavailable after Service Worker takeover',
+              )
+            }
+            markTakeoverAttempt(config.workerPath)
+            publish({
+              phase: 'registering',
+              controlled: true,
+              revalidating: false,
+              updateAvailable: false,
+              message: '旧 Service Worker 不支持 FWA kernel API，正在接管 scope…',
+            })
+            const registration = await registrationOwner.replaceServiceWorker()
+            assertRegistrationScope(registration, config.scopePath)
+            await waitForRegistrationActivation(registration, config.workerPath)
+            window.location.reload()
+            return
+          }
+
+          clearTakeoverAttempt(config.workerPath)
+          publishSnapshot(snapshot)
+          snapshotPublished = true
+        } catch (error) {
+          startupError = error
         }
-        markTakeoverAttempt(config.workerPath)
-        publish({
-          phase: 'registering',
-          controlled: true,
-          revalidating: false,
-          updateAvailable: false,
-          message: '旧 Service Worker 不支持 FWA kernel API，正在接管 scope…',
-        })
-        const registration = await registrationOwner.replaceServiceWorker()
-        assertRegistrationScope(registration, config.scopePath)
-        await waitForRegistrationActivation(registration, config.workerPath)
-        window.location.reload()
+      }))
+      if (startupError !== undefined) {
+        throw startupError
+      }
+      if (!snapshotPublished) {
+        // Takeover reload in progress; startup does not continue.
         return
       }
-
-      clearTakeoverAttempt(config.workerPath)
-      publishSnapshot(snapshot)
     } else {
       publish({
         phase: 'registering',
@@ -562,7 +593,7 @@ export function createLocalEdgeDocumentRuntime(
   }
 
   const handleControllerChange = () => {
-    void readAndPublishSnapshot().catch(publishRuntimeError)
+    void enqueueSnapshotRead()
   }
 
   const handleKernelMessage = (event: MessageEvent) => {

@@ -1095,6 +1095,67 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('does not let a slow startup read overwrite a newer commit observation', async () => {
+      let stateCall = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const headers = new Headers(fwaKernelStateHeaders())
+            if (stateCall === 1) {
+              // A commit lands while the startup read is still in flight.
+              serviceWorker.dispatchEvent(
+                kernelMessage(
+                  {
+                    type: fwaRevalidationCommittedMessageType,
+                    releaseId: 'release-b',
+                  },
+                  controllerSource(serviceWorker),
+                ),
+              )
+              await new Promise((resolve) => setTimeout(resolve, 30))
+              // The startup read resolves with the pre-commit kernel state.
+              return Response.json(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                { headers },
+              )
+            }
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-b' },
+              },
+              { headers },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-a' },
+              status: 'current',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      // The terminal pull runs after the startup read on the ordered chain,
+      // so its newer observation survives the older startup snapshot.
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+      })
+    })
+
     it('keeps a document-owned revalidate flag when a settle pull lands mid-revalidate', async () => {
       const { runtime, serviceWorker, fetchMock } = createControlledKernel({
         scheduledResponse: new Promise<Response>(() => {}),
