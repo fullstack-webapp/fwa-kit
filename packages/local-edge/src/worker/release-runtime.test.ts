@@ -7,6 +7,7 @@ import type { AppReleaseDescriptor, VerifiedAppRelease } from '../release.ts'
 const verifierState: {
   descriptor: AppReleaseDescriptor
   failure?: Error
+  assetFailure?: Error
   gateAssets?: Promise<void>
 } = {
   descriptor: { localEdgeEnabled: false },
@@ -19,12 +20,20 @@ vi.mock('./release-verifier.ts', () => ({
     }
     return verifierState.descriptor
   }),
-  fetchVerifiedAsset: vi.fn(async () => {
-    if (verifierState.failure) {
-      throw verifierState.failure
+  fetchVerifiedAsset: vi.fn(async (_asset: unknown, signal?: AbortSignal) => {
+    if (verifierState.assetFailure) {
+      throw verifierState.assetFailure
     }
     if (verifierState.gateAssets) {
-      await verifierState.gateAssets
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => reject(new DOMException('Aborted', 'AbortError'))
+        if (signal?.aborted) {
+          onAbort()
+          return
+        }
+        signal?.addEventListener('abort', onAbort, { once: true })
+        verifierState.gateAssets!.then(resolve, reject)
+      })
     }
     return new Response('export const marker = 1', {
       status: 200,
@@ -80,6 +89,8 @@ describe('release-runtime candidate install progress', () => {
     cacheStore = new Map()
     verifierState.descriptor = makeReleaseDescriptor(5)
     verifierState.failure = undefined
+    verifierState.assetFailure = undefined
+    verifierState.gateAssets = undefined
 
     const nowSpy = vi.spyOn(Date, 'now')
     nowSpy
@@ -156,8 +167,8 @@ describe('release-runtime candidate install progress', () => {
     expect(snapshot.revalidation).toBeUndefined()
   })
 
-  it('clears progress state and does not broadcast committed when an asset fails', async () => {
-    verifierState.failure = new Error('candidate asset failed')
+  it('clears progress state and broadcasts failed (not committed) when an asset fails', async () => {
+    verifierState.assetFailure = new Error('candidate asset failed')
 
     await expect(
       runtime.revalidateReleaseForClient('window-1'),
@@ -172,6 +183,81 @@ describe('release-runtime candidate install progress', () => {
           '__fwa:revalidation-committed',
       ),
     ).toBe(false)
+    const releaseId = (verifierState.descriptor as {
+      release?: { releaseId: string }
+    }).release?.releaseId
+    expect(
+      client.postMessage.mock.calls.some(
+        (call: unknown[]) =>
+          (call[0] as { type?: string; releaseId?: string })?.type ===
+            '__fwa:revalidation-failed' &&
+          (call[0] as { releaseId?: string }).releaseId === releaseId,
+      ),
+    ).toBe(true)
+  })
+
+  it('does not broadcast failed when reset aborts the install', async () => {
+    const never = new Promise<void>(() => {})
+    verifierState.gateAssets = never
+
+    const revalidation = runtime.revalidateReleaseForClient('window-1')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    await runtime.resetReleaseRuntime()
+    await expect(revalidation).rejects.toThrow()
+
+    expect(
+      client.postMessage.mock.calls.some(
+        (call: unknown[]) =>
+          (call[0] as { type?: string } | undefined)?.type ===
+          '__fwa:revalidation-failed',
+      ),
+    ).toBe(false)
+    expect(
+      client.postMessage.mock.calls.some(
+        (call: unknown[]) =>
+          (call[0] as { type?: string } | undefined)?.type ===
+          '__fwa:revalidation-committed',
+      ),
+    ).toBe(false)
+  })
+
+  it('does not broadcast failed when the descriptor fetch fails before an install starts', async () => {
+    verifierState.failure = new Error('descriptor fetch failed')
+
+    await expect(
+      runtime.revalidateReleaseForClient('window-1'),
+    ).rejects.toThrow('descriptor fetch failed')
+
+    expect(client.postMessage.mock.calls).toHaveLength(0)
+  })
+
+  it('sends the final progress message even when assets complete in the same millisecond', async () => {
+    verifierState.descriptor = makeReleaseDescriptor(3)
+    const nowSpy = vi.spyOn(Date, 'now')
+    nowSpy.mockReset().mockReturnValue(2000)
+
+    await runtime.revalidateReleaseForClient('window-1')
+
+    const progressMessages = client.postMessage.mock.calls
+      .map(([payload]) => payload as { type?: string; completedAssets?: number; totalAssets?: number })
+      .filter((payload) => payload.type === '__fwa:revalidation-progress')
+    expect(progressMessages).toEqual([
+      {
+        type: '__fwa:revalidation-progress',
+        releaseId: (verifierState.descriptor as { release?: { releaseId: string } })
+          .release?.releaseId,
+        completedAssets: 1,
+        totalAssets: 3,
+      },
+      {
+        type: '__fwa:revalidation-progress',
+        releaseId: (verifierState.descriptor as { release?: { releaseId: string } })
+          .release?.releaseId,
+        completedAssets: 3,
+        totalAssets: 3,
+      },
+    ])
   })
 
   it('exposes revalidation in the snapshot while the install is running', async () => {

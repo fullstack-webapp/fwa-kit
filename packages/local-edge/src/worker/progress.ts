@@ -38,19 +38,24 @@ export function beginRevalidationInstall(
 export function recordCompletedAsset(
   state: RevalidationInstallState,
   nowMs: number,
-): RevalidationInstallState {
+): { state: RevalidationInstallState; shouldBroadcast: boolean } {
   const progress = state.progress
   if (!progress) {
-    return state
+    return { state, shouldBroadcast: false }
   }
   const completedAssets = progress.completedAssets + 1
   const nextProgress = { ...progress, completedAssets }
-  return shouldBroadcastRevalidationProgress(
+  const shouldBroadcast = shouldBroadcastRevalidationProgress(
     nowMs,
     state.lastBroadcastAtMs,
     completedAssets,
     progress.totalAssets,
   )
-    ? { progress: nextProgress, lastBroadcastAtMs: nowMs }
-    : { progress: nextProgress, lastBroadcastAtMs: state.lastBroadcastAtMs }
+  return {
+    state: {
+      progress: nextProgress,
+      lastBroadcastAtMs: shouldBroadcast ? nowMs : state.lastBroadcastAtMs,
+    },
+    shouldBroadcast,
+  }
 }

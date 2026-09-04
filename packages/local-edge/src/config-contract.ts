@@ -42,6 +42,7 @@ export const fwaKernelProtocolVersion = 1
 export const fwaTakeoverMessageType = '__fwa:takeover'
 export const fwaRevalidationProgressMessageType = '__fwa:revalidation-progress'
 export const fwaRevalidationCommittedMessageType = '__fwa:revalidation-committed'
+export const fwaRevalidationFailedMessageType = '__fwa:revalidation-failed'
 export type LocalEdgeNavigationMode = 'network' | 'reset'
 export type LocalEdgeDebugSeed = 'enable' | 'disable' | 'reset'
 

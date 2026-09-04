@@ -1,6 +1,7 @@
 import { localEdgeConfig } from '../config.ts'
 import {
   fwaRevalidationCommittedMessageType,
+  fwaRevalidationFailedMessageType,
   fwaRevalidationProgressMessageType,
 } from '../config-contract.ts'
 import {
@@ -292,6 +293,12 @@ async function revalidateRelease(signal: AbortSignal) {
       release,
     } satisfies LocalEdgeRevalidationResult
   } catch (error) {
+    // An aborted install is part of a reset takeover: the kernel is being
+    // torn down and clients learn about it through registration events, so
+    // do not invite them to re-pull state from a vanishing worker.
+    if (!signal.aborted) {
+      await broadcastRevalidationFailed(release.releaseId)
+    }
     if (!isRepairingActive && !isKnownRetained) {
       await caches.delete(candidateCacheName)
     }
@@ -500,13 +507,13 @@ function recordCandidateInstallProgress() {
   if (!install) {
     return
   }
-  const updated = recordCompletedAsset(install, Date.now())
+  const { state: updated, shouldBroadcast } = recordCompletedAsset(
+    install,
+    Date.now(),
+  )
   revalidationInstall = updated
   const progress = updated.progress
-  if (
-    !progress ||
-    updated.lastBroadcastAtMs === install.lastBroadcastAtMs
-  ) {
+  if (!shouldBroadcast || !progress) {
     return
   }
   void broadcastToWindowClients({
@@ -515,6 +522,13 @@ function recordCandidateInstallProgress() {
     completedAssets: progress.completedAssets,
     totalAssets: progress.totalAssets,
   })
+}
+
+function broadcastRevalidationFailed(releaseId: string) {
+  return broadcastToWindowClients({
+    type: fwaRevalidationFailedMessageType,
+    releaseId,
+  }).catch(() => undefined)
 }
 
 function broadcastRevalidationCommitted(releaseId: string) {

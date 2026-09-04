@@ -56,32 +56,70 @@ describe('revalidation install bookkeeping', () => {
       totalAssets: 5,
     })
 
-    state = recordCompletedAsset(state, 0)
+    let first = recordCompletedAsset(state, 0)
+    state = first.state
     expect(state.progress).toEqual({
       releaseId: 'release-x',
       completedAssets: 1,
       totalAssets: 5,
     })
     expect(state.lastBroadcastAtMs).toBe(0)
+    expect(first.shouldBroadcast).toBe(true)
 
-    state = recordCompletedAsset(state, 100)
+    let throttled = recordCompletedAsset(state, 100)
+    state = throttled.state
     expect(state.progress?.completedAssets).toBe(2)
     expect(state.lastBroadcastAtMs).toBe(0)
+    expect(throttled.shouldBroadcast).toBe(false)
 
-    state = recordCompletedAsset(state, 250)
+    let interval = recordCompletedAsset(state, 250)
+    state = interval.state
     expect(state.progress?.completedAssets).toBe(3)
     expect(state.lastBroadcastAtMs).toBe(250)
+    expect(interval.shouldBroadcast).toBe(true)
 
-    state = recordCompletedAsset(state, 260)
+    throttled = recordCompletedAsset(state, 260)
+    state = throttled.state
     expect(state.progress?.completedAssets).toBe(4)
     expect(state.lastBroadcastAtMs).toBe(250)
+    expect(throttled.shouldBroadcast).toBe(false)
 
-    state = recordCompletedAsset(state, 260)
+    first = recordCompletedAsset(state, 260)
+    state = first.state
     expect(state.progress).toEqual({
       releaseId: 'release-x',
       completedAssets: 5,
       totalAssets: 5,
     })
     expect(state.lastBroadcastAtMs).toBe(260)
+    expect(first.shouldBroadcast).toBe(true)
+  })
+
+  it('requests the final broadcast even in the same millisecond as the previous broadcast', () => {
+    let state = beginRevalidationInstall('release-x', 3)
+
+    let step = recordCompletedAsset(state, 500)
+    state = step.state
+    expect(step.shouldBroadcast).toBe(true)
+
+    step = recordCompletedAsset(state, 500)
+    state = step.state
+    expect(step.shouldBroadcast).toBe(false)
+
+    step = recordCompletedAsset(state, 500)
+    expect(step.state.progress).toEqual({
+      releaseId: 'release-x',
+      completedAssets: 3,
+      totalAssets: 3,
+    })
+    expect(step.state.lastBroadcastAtMs).toBe(500)
+    expect(step.shouldBroadcast).toBe(true)
+  })
+
+  it('never requests a broadcast for an empty install', () => {
+    const state = beginRevalidationInstall('release-x', 0)
+    expect(
+      shouldBroadcastRevalidationProgress(0, state.lastBroadcastAtMs, 1, 0),
+    ).toBe(false)
   })
 })

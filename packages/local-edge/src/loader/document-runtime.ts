@@ -6,6 +6,7 @@ import type {
 import {
   defaultUpdateCheckIntervalMinutes,
   fwaRevalidationCommittedMessageType,
+  fwaRevalidationFailedMessageType,
   fwaRevalidationProgressMessageType,
   isValidUpdateCheckIntervalMinutes,
   localEdgeControlPathsFor,
@@ -208,11 +209,22 @@ export function createLocalEdgeDocumentRuntime(
     publishSnapshot(snapshot, warning)
   }
 
-  // A kernel commit broadcast reaches every controlled window client, including
-  // the document whose own revalidate just committed. The pull must not relabel
-  // the running document: keep the loaded releaseId and only surface a kernel
-  // active release that differs from it as an available update.
-  const publishCommittedSnapshot = async () => {
+  // A kernel settle broadcast (commit or failure) reaches every controlled
+  // window client, including the document whose own revalidate just settled.
+  // The pull must not relabel the running document: keep the loaded releaseId
+  // and only surface a kernel active release that differs from it as an
+  // available update. An explicitly network-opened document stays on the
+  // network baseline by contract and only drops stale progress.
+  const publishSettledSnapshot = async () => {
+    const { revalidationProgress: _droppedProgress, ...restState } = state
+    void _droppedProgress
+    if (restState.phase === 'network-only') {
+      publish({
+        ...restState,
+        revalidating: false,
+      })
+      return
+    }
     const snapshot = await fetchKernelSnapshot()
     if (!snapshot) {
       publish({
@@ -224,8 +236,6 @@ export function createLocalEdgeDocumentRuntime(
       })
       return
     }
-    const { revalidationProgress: _droppedProgress, ...restState } = state
-    void _droppedProgress
     if (snapshot.mode !== 'active') {
       publishSnapshot(snapshot)
       return
@@ -535,7 +545,11 @@ export function createLocalEdgeDocumentRuntime(
       return
     }
     if (payload.type === fwaRevalidationCommittedMessageType) {
-      void publishCommittedSnapshot().catch(publishRuntimeError)
+      void publishSettledSnapshot().catch(publishRuntimeError)
+      return
+    }
+    if (payload.type === fwaRevalidationFailedMessageType) {
+      void publishSettledSnapshot().catch(publishRuntimeError)
     }
   }
 

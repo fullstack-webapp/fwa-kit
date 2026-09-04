@@ -3,6 +3,7 @@ import {
   fwaKernelProtocolHeaderName,
   fwaKernelProtocolVersion,
   fwaRevalidationCommittedMessageType,
+  fwaRevalidationFailedMessageType,
   fwaRevalidationProgressMessageType,
   maxUpdateCheckIntervalMinutes,
 } from '../config-contract.ts'
@@ -125,6 +126,7 @@ function createControlledKernel(options: {
     enabled?: boolean
     intervalMinutes?: number
   }
+  documentHref?: string
   revalidationStatus?: string
   revalidationReleaseId?: string
   scheduledFailure?: boolean
@@ -137,6 +139,7 @@ function createControlledKernel(options: {
     snapshotMode = 'active',
     snapshotRevalidation,
     updateCheck,
+    documentHref = 'https://app.example/',
     revalidationStatus = 'current',
     revalidationReleaseId,
     scheduledFailure = false,
@@ -213,7 +216,7 @@ function createControlledKernel(options: {
   vi.stubGlobal('navigator', { serviceWorker })
   vi.stubGlobal('window', {
     location: {
-      href: 'https://app.example/',
+      href: documentHref,
       origin: 'https://app.example',
       reload,
       replace: vi.fn(),
@@ -1004,6 +1007,94 @@ describe('createLocalEdgeDocumentRuntime', () => {
       )
       await vi.waitFor(() => {
         expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
+    it('keeps an explicitly network-opened document on the network baseline when a commit settles', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({
+        documentHref: 'https://app.example/?__fwa=network',
+      })
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          controlled: true,
+        })
+      })
+      expect(runtime.getState().releaseId).toBeUndefined()
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 4,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState()).toMatchObject({
+        phase: 'network-only',
+        revalidationProgress: {
+          releaseId: 'release-b',
+          completedAssets: 1,
+          totalAssets: 4,
+        },
+      })
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          controlled: true,
+          revalidating: false,
+          updateAvailable: false,
+          message: '当前页面经显式 network open 进入，不重新注册 Local Edge。',
+        })
+      })
+      expect(runtime.getState().releaseId).toBeUndefined()
+      expect(runtime.getState().availableReleaseId).toBeUndefined()
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+    })
+
+    it('drops progress and re-pulls the snapshot after a failed install message', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 2,
+            totalAssets: 6,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      const fetchCallsBefore = fetchMock.mock.calls.length
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationFailedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(fetchCallsBefore)
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        revalidating: false,
+        updateAvailable: false,
       })
     })
 

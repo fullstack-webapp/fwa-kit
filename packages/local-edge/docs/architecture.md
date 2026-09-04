@@ -54,7 +54,7 @@ The network entry remains independently runnable. A production build creates an 
 
 The worker installs a candidate into a release-scoped cache. It verifies each asset and rereads the complete cache before committing the active pointer in IndexedDB. Existing documents remain pinned to their loaded release; later documents select the newest complete active release.
 
-During a candidate install the worker keeps an in-memory progress counter and broadcasts best-effort `__fwa:revalidation-progress` messages to window clients, plus a single `__fwa:revalidation-committed` message after the active pointer is committed. Progress stays in memory only; a worker restart clears it and clients fall back to activity UI.
+During a candidate install the worker keeps an in-memory progress counter and broadcasts best-effort `__fwa:revalidation-progress` messages to window clients, plus a single `__fwa:revalidation-committed` message after the active pointer is committed or a `__fwa:revalidation-failed` message when the install attempt does not commit. Progress stays in memory only; a worker restart clears it and clients fall back to activity UI.
 
 This is release-level stale-while-revalidate. It is not per-request HTTP stale-while-revalidate and does not promise the newest release while offline.
 
