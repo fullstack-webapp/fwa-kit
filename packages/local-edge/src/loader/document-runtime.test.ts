@@ -1044,6 +1044,113 @@ describe('createLocalEdgeDocumentRuntime', () => {
       expect(runtime.getState().revalidating).toBe(true)
     })
 
+    it('ignores an out-of-order progress broadcast that would regress the count', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 5,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        releaseId: 'release-b',
+        completedAssets: 5,
+        totalAssets: 10,
+      })
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 2,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        releaseId: 'release-b',
+        completedAssets: 5,
+        totalAssets: 10,
+      })
+    })
+
+    it('lets a newer terminal message overwrite an older settle pull result', async () => {
+      let stateCall = 0
+      const customFetch = async (input: RequestInfo | URL) => {
+        const requestUrl = String(input)
+        if (requestUrl === '/__fwa/state') {
+          stateCall += 1
+          const headers = new Headers(fwaKernelStateHeaders())
+          if (stateCall === 1) {
+            return Response.json(
+              { localEdgeEnabled: true, mode: 'active', release: { releaseId: 'release-a' } },
+              { headers },
+            )
+          }
+          if (stateCall === 2) {
+            // The first settle pull is slow; without serialization its result
+            // would land after the second pull's and overwrite it.
+            await new Promise((resolve) => setTimeout(resolve, 30))
+            return Response.json(
+              { localEdgeEnabled: true, mode: 'active', release: { releaseId: 'release-b' } },
+              { headers },
+            )
+          }
+          return Response.json(
+            { localEdgeEnabled: true, mode: 'active', release: { releaseId: 'release-c' } },
+            { headers },
+          )
+        }
+        if (requestUrl === '/__fwa/revalidate') {
+          return Response.json({
+            localEdgeEnabled: true,
+            release: { releaseId: 'release-a' },
+            status: 'current',
+          })
+        }
+        throw new Error(`unexpected fetch: ${requestUrl}`)
+      }
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: customFetch,
+      })
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'ready',
+          releaseId: 'release-a',
+        })
+      })
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-c' },
+          controllerSource(serviceWorker),
+        ),
+      )
+
+      await vi.waitFor(() => {
+        expect(runtime.getState().availableReleaseId).toBe('release-c')
+      })
+      // Well past the delayed pull's landing time: the older settle result
+      // must not have overwritten the newer one.
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      expect(runtime.getState().availableReleaseId).toBe('release-c')
+    })
+
     it('keeps an explicitly network-opened document on the network baseline when a commit settles', async () => {
       const { runtime, serviceWorker } = createControlledKernel({
         documentHref: 'https://app.example/?__fwa=network',

@@ -83,6 +83,7 @@ export function createLocalEdgeDocumentRuntime(
   const listeners = new Set<LocalEdgeStateListener>()
   let state = initialState
   let explicitNetworkOpen = false
+  let settlePullChain: Promise<void> = Promise.resolve()
   let started = false
   let stopped = false
   let scheduledChecksStarted = false
@@ -565,18 +566,29 @@ export function createLocalEdgeDocumentRuntime(
       if (!progress) {
         return
       }
+      const current = state.revalidationProgress
+      if (
+        current?.releaseId === progress.releaseId &&
+        current.completedAssets > progress.completedAssets
+      ) {
+        // An out-of-order broadcast must not regress the visible count.
+        return
+      }
       publish({
         ...state,
         revalidationProgress: progress,
       })
       return
     }
-    if (payload.type === fwaRevalidationCommittedMessageType) {
-      void publishSettledSnapshot().catch(publishRuntimeError)
-      return
-    }
-    if (payload.type === fwaRevalidationFailedMessageType) {
-      void publishSettledSnapshot().catch(publishRuntimeError)
+    if (
+      payload.type === fwaRevalidationCommittedMessageType ||
+      payload.type === fwaRevalidationFailedMessageType
+    ) {
+      // Terminal pulls are serialized: an earlier settle response can never
+      // overwrite the result of a later terminal message.
+      settlePullChain = settlePullChain.then(() =>
+        publishSettledSnapshot().catch(publishRuntimeError),
+      )
     }
   }
 
