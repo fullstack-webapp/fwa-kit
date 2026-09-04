@@ -1,5 +1,9 @@
 import { localEdgeConfig } from '../config.ts'
 import {
+  fwaRevalidationCommittedMessageType,
+  fwaRevalidationProgressMessageType,
+} from '../config-contract.ts'
+import {
   releaseAssetPaths,
   type AppRelease,
   type LocalEdgeRevalidationResult,
@@ -23,12 +27,18 @@ import {
   fetchVerifiedReleaseDescriptor,
 } from './release-verifier.ts'
 import { runBoundedTasks } from './bounded-tasks.ts'
+import {
+  beginRevalidationInstall,
+  recordCompletedAsset,
+  type RevalidationInstallState,
+} from './progress.ts'
 
 const worker = self as unknown as ServiceWorkerGlobalScope
 const releaseCachePrefix = `fwa-local-edge:${localEdgeConfig.appId}:release:`
 const candidateInstallConcurrency = 8
 let revalidationInFlight: Promise<LocalEdgeRevalidationResult> | undefined
 let revalidationAbortController: AbortController | undefined
+let revalidationInstall: RevalidationInstallState | undefined
 let resetInFlight: Promise<void> | undefined
 let resetStarted = false
 let clientReleasePins: Map<string, string> | undefined
@@ -58,12 +68,14 @@ export async function revalidateReleaseForClient(clientId: string) {
 export async function getLocalEdgeSnapshot(): Promise<LocalEdgeSnapshot> {
   const enabled = await isLocalEdgeRuntimeEnabled()
   const releaseState = await readReleaseState()
+  const revalidation = revalidationInstall?.progress
   if (!enabled) {
     return {
       localEdgeEnabled: false,
       mode: 'disabled',
       release: releaseState.active,
       retainedReleases: releaseState.retained,
+      ...(revalidation ? { revalidation } : undefined),
     }
   }
   return releaseState.active
@@ -72,8 +84,13 @@ export async function getLocalEdgeSnapshot(): Promise<LocalEdgeSnapshot> {
         mode: 'active',
         release: releaseState.active,
         retainedReleases: releaseState.retained,
+        ...(revalidation ? { revalidation } : undefined),
       }
-    : { localEdgeEnabled: true, mode: 'network-only' }
+    : {
+        localEdgeEnabled: true,
+        mode: 'network-only',
+        ...(revalidation ? { revalidation } : undefined),
+      }
 }
 
 export async function isLocalEdgeRuntimeEnabled() {
@@ -219,6 +236,11 @@ async function revalidateRelease(signal: AbortSignal) {
   })
   const candidateCache = await caches.open(candidateCacheName)
 
+  revalidationInstall = beginRevalidationInstall(
+    release.releaseId,
+    release.assets.length,
+  )
+
   try {
     await runBoundedTasks(
       release.assets,
@@ -228,6 +250,7 @@ async function revalidateRelease(signal: AbortSignal) {
           asset.path,
           await fetchVerifiedAsset(asset, signal),
         )
+        recordCandidateInstallProgress()
       },
     )
 
@@ -257,6 +280,7 @@ async function revalidateRelease(signal: AbortSignal) {
       },
       { clearCandidate: true, localEdgeEnabled: true },
     )
+    await broadcastRevalidationCommitted(release.releaseId)
     localEdgeEnabled = true
     return {
       status: !activeRelease
@@ -273,6 +297,8 @@ async function revalidateRelease(signal: AbortSignal) {
     }
     await clearCandidateJournal()
     throw error
+  } finally {
+    revalidationInstall = undefined
   }
 }
 
@@ -282,6 +308,7 @@ async function finishReset() {
   } catch {
     // Reset owns the final cleanup after an interrupted revalidation.
   }
+  revalidationInstall = undefined
 
   const cacheNames = await caches.keys()
   await Promise.all(
@@ -465,5 +492,42 @@ function dedupeReleases(releases: readonly AppRelease[]) {
     }
     releaseIds.add(release.releaseId)
     return true
+  })
+}
+
+function recordCandidateInstallProgress() {
+  const install = revalidationInstall
+  if (!install) {
+    return
+  }
+  const updated = recordCompletedAsset(install, Date.now())
+  revalidationInstall = updated
+  const progress = updated.progress
+  if (
+    !progress ||
+    updated.lastBroadcastAtMs === install.lastBroadcastAtMs
+  ) {
+    return
+  }
+  void broadcastToWindowClients({
+    type: fwaRevalidationProgressMessageType,
+    releaseId: progress.releaseId,
+    completedAssets: progress.completedAssets,
+    totalAssets: progress.totalAssets,
+  })
+}
+
+function broadcastRevalidationCommitted(releaseId: string) {
+  return broadcastToWindowClients({
+    type: fwaRevalidationCommittedMessageType,
+    releaseId,
+  })
+}
+
+function broadcastToWindowClients(payload: unknown) {
+  return worker.clients.matchAll({ type: 'window' }).then((clients) => {
+    for (const client of clients) {
+      client.postMessage(payload)
+    }
   })
 }

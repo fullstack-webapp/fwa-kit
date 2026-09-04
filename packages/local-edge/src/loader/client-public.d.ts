@@ -23,10 +23,17 @@ export interface LocalEdgeClientState {
   availableReleaseId?: string
   revalidating: boolean
   updateAvailable: boolean
+  revalidationProgress?: LocalEdgeRevalidationProgress
   message: string
 }
 
 export type LocalEdgeStateListener = (state: LocalEdgeClientState) => void
+
+export interface LocalEdgeRevalidationProgress {
+  releaseId: string
+  completedAssets: number
+  totalAssets: number
+}
 
 export interface LocalEdgeUpdateCheckCommandConfig {
   enabled?: boolean

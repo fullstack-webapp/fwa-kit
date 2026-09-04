@@ -28,11 +28,18 @@ export interface AppReleaseDescriptor {
   release?: VerifiedAppRelease
 }
 
+export interface LocalEdgeRevalidationProgress {
+  releaseId: string
+  completedAssets: number
+  totalAssets: number
+}
+
 export interface LocalEdgeSnapshot {
   localEdgeEnabled: boolean
   mode: 'active' | 'disabled' | 'network-only'
   release?: AppRelease
   retainedReleases?: readonly AppRelease[]
+  revalidation?: LocalEdgeRevalidationProgress
 }
 
 export type LocalEdgeRevalidationStatus =

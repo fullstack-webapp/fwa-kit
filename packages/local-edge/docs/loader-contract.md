@@ -81,3 +81,21 @@ Supported Local Edge commands mirror the facade methods: `localEdge.getState`, `
 ## Update state
 
 `releaseId` identifies the release running in the current document. `availableReleaseId` identifies a newer complete release. `updateAvailable` becomes true only after candidate verification and commit. Revalidation never refreshes the current document implicitly. Scheduled revalidation leaves `revalidating` and `message` unchanged; explicit `revalidate()` retains its visible activity and error behavior.
+
+## Revalidation visibility
+
+While the kernel installs a candidate release it broadcasts progress to controlled window clients and exposes the same progress through the state endpoint:
+
+| Field | Presence | Shape |
+| --- | --- | --- |
+| `LocalEdgeClientState.revalidationProgress` | Only while a kernel-level install is running; omitted otherwise | `{ releaseId, completedAssets, totalAssets }` |
+| snapshot `revalidation` | Only while a kernel-level install is running; omitted otherwise | `{ releaseId, completedAssets, totalAssets }` |
+
+Both are optional and additive: older loaders and consumers ignore them, and a kernel that predates the fields never sends or reports them.
+
+The kernel emits two message types to controlled window clients via `postMessage`:
+
+- `__fwa:revalidation-progress` with `{ type, releaseId, completedAssets, totalAssets }`, at most one message every 250 ms while assets complete, always ending with `completedAssets === totalAssets`.
+- `__fwa:revalidation-committed` with `{ type, releaseId }` after a verified candidate is committed.
+
+`revalidationProgress` is kernel-level and independent of the document's own `revalidating` flag: any tab's revalidation install broadcasts to every controlled window client, while `revalidating` continues to reflect only the current document's own `revalidate()` calls. A loader that sees a `__fwa:revalidation-committed` message pulls the state endpoint again (event-then-pull), which naturally drops a stale progress value once the kernel has finished. Both message channels are best-effort and in-memory; a worker restart clears progress, and the progress UI should fall back to a spinner rather than assuming a percentage is always available.

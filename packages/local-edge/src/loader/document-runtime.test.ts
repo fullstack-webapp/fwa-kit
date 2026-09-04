@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   fwaKernelProtocolHeaderName,
   fwaKernelProtocolVersion,
+  fwaRevalidationCommittedMessageType,
+  fwaRevalidationProgressMessageType,
   maxUpdateCheckIntervalMinutes,
 } from '../config-contract.ts'
 import {
@@ -114,6 +116,11 @@ function createControlledKernel(options: {
   scheduler?: LocalEdgeDocumentScheduler
   protocolVersion?: string | null
   snapshotMode?: 'active' | 'disabled' | 'network-only'
+  snapshotRevalidation?: {
+    releaseId: string
+    completedAssets: number
+    totalAssets: number
+  }
   updateCheck?: {
     enabled?: boolean
     intervalMinutes?: number
@@ -128,6 +135,7 @@ function createControlledKernel(options: {
     scheduler,
     protocolVersion = String(fwaKernelProtocolVersion),
     snapshotMode = 'active',
+    snapshotRevalidation,
     updateCheck,
     revalidationStatus = 'current',
     revalidationReleaseId,
@@ -170,6 +178,7 @@ function createControlledKernel(options: {
           ...(snapshotMode === 'active'
             ? { release: { releaseId: 'release-a' } }
             : undefined),
+          ...(snapshotRevalidation ? { revalidation: snapshotRevalidation } : undefined),
         },
         { headers },
       )
@@ -237,6 +246,7 @@ function createControlledKernel(options: {
     reload,
     replaceServiceWorker,
     runtime,
+    serviceWorker,
   }
 }
 
@@ -929,6 +939,272 @@ describe('createLocalEdgeDocumentRuntime', () => {
           ),
         ).toHaveLength(2)
       })
+    })
+  })
+
+  describe('kernel revalidation progress messages', () => {
+    const controllerSource = (serviceWorker: { controller: ServiceWorker | null }) =>
+      serviceWorker.controller
+
+    function kernelMessage(
+      data: unknown,
+      source: unknown,
+    ): MessageEvent {
+      const event = new MessageEvent('message', { data })
+      Object.defineProperty(event, 'source', {
+        configurable: true,
+        value: source,
+      })
+      return event
+    }
+
+    it('publishes revalidationProgress from the kernel snapshot when a pull sees an install', async () => {
+      const { runtime } = createControlledKernel({
+        snapshotRevalidation: {
+          releaseId: 'release-b',
+          completedAssets: 2,
+          totalAssets: 9,
+        },
+      })
+      await settle(runtime)
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        revalidationProgress: {
+          releaseId: 'release-b',
+          completedAssets: 2,
+          totalAssets: 9,
+        },
+      })
+    })
+
+    it('drops a stale revalidationProgress after a committed snapshot pull', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
+    it('keeps an announced available update when the committed pull sees the same active release', async () => {
+      let announcedActive = 'release-a'
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({
+        revalidationReleaseId: 'release-b',
+        revalidationStatus: 'updated',
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: announcedActive },
+              },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-b' },
+              status: 'updated',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      // The document's own visible revalidate announces the update.
+      const outcome = runtime.revalidate()
+      await outcome
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+      })
+
+      // The kernel commit broadcast pulls a snapshot whose active release is the
+      // one it just committed (release-b). The loader keeps the announcement.
+      announcedActive = 'release-b'
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(
+            ([input]) => String(input) === '/__fwa/state',
+          ),
+        ).toHaveLength(2)
+      })
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+      })
+    })
+
+    it('publishes revalidationProgress from a matching progress message', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        revalidationProgress: {
+          releaseId: 'release-b',
+          completedAssets: 3,
+          totalAssets: 12,
+        },
+      })
+      expect(runtime.getState().revalidating).toBe(false)
+    })
+
+    it('pulls and publishes the snapshot after a committed message', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      await settle(runtime)
+      const stateFetchesBefore = fetchMock.mock.calls.filter(
+        ([input]) => String(input) === '/__fwa/state',
+      ).length
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+
+      await vi.waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(
+            ([input]) => String(input) === '/__fwa/state',
+          ),
+        ).toHaveLength(stateFetchesBefore + 1)
+      })
+    })
+
+    it('ignores messages from a worker that is not the current controller', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      await settle(runtime)
+      const stateFetchesBefore = fetchMock.mock.calls.filter(
+        ([input]) => String(input) === '/__fwa/state',
+      ).length
+      const foreignWorker = { scriptURL: 'https://app.example/other-sw.js' }
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          foreignWorker,
+        ),
+      )
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          foreignWorker,
+        ),
+      )
+
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input]) => String(input) === '/__fwa/state',
+        ),
+      ).toHaveLength(stateFetchesBefore)
+    })
+
+    it('ignores malformed progress messages', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      for (const data of [
+        'not-an-object',
+        { type: '__fwa:unknown' },
+        {
+          type: fwaRevalidationProgressMessageType,
+          releaseId: 'release-b',
+          completedAssets: '3',
+          totalAssets: 12,
+        },
+        {
+          type: fwaRevalidationProgressMessageType,
+          releaseId: 'release-b',
+          completedAssets: 13,
+          totalAssets: 12,
+        },
+      ]) {
+        serviceWorker.dispatchEvent(
+          kernelMessage(data, controllerSource(serviceWorker)),
+        )
+      }
+
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+    })
+
+    it('removes the message listener when stopped', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      await settle(runtime)
+      runtime.stop()
+      const stateFetchesBefore = fetchMock.mock.calls.filter(
+        ([input]) => String(input) === '/__fwa/state',
+      ).length
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input]) => String(input) === '/__fwa/state',
+        ),
+      ).toHaveLength(stateFetchesBefore)
     })
   })
 })

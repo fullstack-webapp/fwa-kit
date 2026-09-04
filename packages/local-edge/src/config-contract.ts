@@ -40,6 +40,8 @@ export const fwaKernelProbeHeaderName = 'X-FWA-Kernel'
 export const fwaKernelProtocolHeaderName = 'X-FWA-Kernel-Protocol'
 export const fwaKernelProtocolVersion = 1
 export const fwaTakeoverMessageType = '__fwa:takeover'
+export const fwaRevalidationProgressMessageType = '__fwa:revalidation-progress'
+export const fwaRevalidationCommittedMessageType = '__fwa:revalidation-committed'
 export type LocalEdgeNavigationMode = 'network' | 'reset'
 export type LocalEdgeDebugSeed = 'enable' | 'disable' | 'reset'
 

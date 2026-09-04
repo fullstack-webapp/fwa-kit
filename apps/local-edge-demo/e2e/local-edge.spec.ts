@@ -1888,6 +1888,136 @@ test.describe('Local Edge v0', () => {
     }
   })
 
+  test('exposes kernel-level revalidation progress and commit broadcasts', async ({
+    browser,
+  }) => {
+    const releaseServer = await startReleaseUpdateServer({
+      candidateFault: 'slow-asset',
+    })
+    const context = await browser.newContext()
+    const page = await context.newPage()
+
+    try {
+      await page.goto(`${releaseServer.baseUrl}/?__fwa_debug=1`)
+      const runtime = page.locator('[data-local-edge-status]')
+      await expect(runtime).toHaveAttribute('data-local-edge-status', 'ready', {
+        timeout: 20_000,
+      })
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const testWindow = globalThis as typeof globalThis & {
+              __fwa?: {
+                localEdge?: { getState(): { revalidating: boolean } }
+              }
+            }
+            return testWindow.__fwa?.localEdge?.getState().revalidating
+          }),
+        )
+        .toBe(false)
+
+      await page.evaluate(() => {
+        const testWindow = globalThis as typeof globalThis & {
+          __fwaCommittedReleaseIds?: string[]
+        }
+        testWindow.__fwaCommittedReleaseIds = []
+        navigator.serviceWorker.addEventListener('message', (event) => {
+          if (
+            event.source instanceof ServiceWorker &&
+            new URL(event.source.scriptURL).pathname === '/__fwa-sw.js' &&
+            typeof event.data === 'object' &&
+            event.data !== null &&
+            (event.data as { type?: unknown }).type ===
+              '__fwa:revalidation-committed'
+          ) {
+            const releaseId = (event.data as { releaseId?: unknown }).releaseId
+            if (typeof releaseId === 'string') {
+              testWindow.__fwaCommittedReleaseIds?.push(releaseId)
+            }
+          }
+        })
+      })
+      // The committed listener above is registered from the document, which
+      // also receives the loader's own broadcasts.
+      const readCommittedMessages = () =>
+        page.evaluate(() => {
+          const testWindow = globalThis as typeof globalThis & {
+            __fwaCommittedReleaseIds?: string[]
+          }
+          return testWindow.__fwaCommittedReleaseIds ?? []
+        })
+
+      await page.evaluate(() =>
+        fetch('/__test/switch-release', { method: 'POST' }),
+      )
+      await page.evaluate(() => {
+        const testWindow = globalThis as typeof globalThis & {
+          pendingRevalidation?: Promise<number>
+          __fwa?: { localEdge?: { revalidate(): Promise<unknown> } }
+        }
+        // Keep the POST pending while the slow candidate asset is gated so the
+        // test can observe the in-flight kernel install.
+        testWindow.pendingRevalidation = testWindow.__fwa?.localEdge
+          ?.revalidate()
+          .then(
+            () => 200,
+            () => 503,
+          ) as Promise<number>
+      })
+
+      // While the slow asset is gated, the kernel reports an in-flight install.
+      await releaseServer.waitForCandidateAssetRequest()
+      const midInstallState = await page.evaluate(async () => {
+        const snapshot = (await fetch('/__fwa/state').then((response) =>
+          response.json(),
+        )) as {
+          revalidation?: {
+            completedAssets: number
+            releaseId: string
+            totalAssets: number
+          }
+        }
+        const revalidation = snapshot.revalidation
+        if (!revalidation) {
+          return undefined
+        }
+        return {
+          completedAssets: revalidation.completedAssets,
+          releaseId: revalidation.releaseId,
+          totalAssets: revalidation.totalAssets,
+        }
+      })
+      expect(midInstallState).toMatchObject({
+        releaseId: releaseServer.updatedReleaseId,
+      })
+      expect(midInstallState?.completedAssets).toBeGreaterThanOrEqual(0)
+      expect(midInstallState?.completedAssets).toBeLessThanOrEqual(
+        midInstallState?.totalAssets ?? Number.MAX_SAFE_INTEGER,
+      )
+      expect(Number.isSafeInteger(midInstallState?.completedAssets)).toBe(true)
+      expect(Number.isSafeInteger(midInstallState?.totalAssets)).toBe(true)
+
+      releaseServer.releaseCandidateAsset()
+      await expect
+        .poll(readCommittedMessages)
+        .toContain(releaseServer.updatedReleaseId)
+
+      // After the commit, the kernel no longer reports an in-flight install.
+      await expect
+        .poll(async () => {
+          const snapshot = await page.evaluate(() =>
+            fetch('/__fwa/state').then((response) => response.json()),
+          )
+          return (snapshot as { revalidation?: unknown }).revalidation
+        })
+        .toBeUndefined()
+    } finally {
+      releaseServer.releaseCandidateAsset()
+      await context.close()
+      await releaseServer.close()
+    }
+  })
+
   test('reset aborts an in-flight candidate before clearing state', async ({
     browser,
   }) => {

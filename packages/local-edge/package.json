@@ -51,6 +51,7 @@
     "src/worker/bounded-tasks.ts",
     "src/worker/kernel-recovery.ts",
     "src/worker/local-edge-worker.ts",
+    "src/worker/progress.ts",
     "src/worker/release-metadata.ts",
     "src/worker/release-runtime.ts",
     "src/worker/release-verifier.ts",

@@ -1,9 +1,12 @@
 import type {
+  LocalEdgeRevalidationProgress,
   LocalEdgeRevalidationResult,
   LocalEdgeSnapshot,
 } from '../release.ts'
 import {
   defaultUpdateCheckIntervalMinutes,
+  fwaRevalidationCommittedMessageType,
+  fwaRevalidationProgressMessageType,
   isValidUpdateCheckIntervalMinutes,
   localEdgeControlPathsFor,
   fwaKernelProbeHeaderName,
@@ -148,6 +151,7 @@ export function createLocalEdgeDocumentRuntime(
   }
 
   const publishSnapshot = (snapshot: LocalEdgeSnapshot, warning?: string) => {
+    const revalidationProgress = snapshot.revalidation
     publish(
       snapshot.mode === 'disabled'
         ? {
@@ -155,6 +159,9 @@ export function createLocalEdgeDocumentRuntime(
             controlled: true,
             revalidating: false,
             updateAvailable: false,
+            ...(revalidationProgress
+              ? { revalidationProgress }
+              : undefined),
             message:
               'Local Edge 已由 release flag 禁用，当前使用 network baseline。',
           }
@@ -165,6 +172,9 @@ export function createLocalEdgeDocumentRuntime(
               releaseId: snapshot.release.releaseId,
               revalidating: false,
               updateAvailable: false,
+              ...(revalidationProgress
+                ? { revalidationProgress }
+                : undefined),
               message:
                 warning ??
                 '本地 release 已提交，navigation 可以从 Cache Storage 启动。',
@@ -174,6 +184,9 @@ export function createLocalEdgeDocumentRuntime(
               controlled: true,
               revalidating: false,
               updateAvailable: false,
+              ...(revalidationProgress
+                ? { revalidationProgress }
+                : undefined),
               message: 'Local Edge 已激活，但还没有可用 release。',
             },
     )
@@ -193,6 +206,69 @@ export function createLocalEdgeDocumentRuntime(
     }
 
     publishSnapshot(snapshot, warning)
+  }
+
+  // A kernel commit broadcast reaches every controlled window client, including
+  // the document whose own revalidate just committed. The pull must not relabel
+  // the running document: keep the loaded releaseId and only surface a kernel
+  // active release that differs from it as an available update.
+  const publishCommittedSnapshot = async () => {
+    const snapshot = await fetchKernelSnapshot()
+    if (!snapshot) {
+      publish({
+        phase: 'network-only',
+        controlled: false,
+        revalidating: false,
+        updateAvailable: false,
+        message: '页面尚未受 Local Edge 控制，继续使用 network baseline。',
+      })
+      return
+    }
+    const { revalidationProgress: _droppedProgress, ...restState } = state
+    void _droppedProgress
+    if (snapshot.mode !== 'active') {
+      publishSnapshot(snapshot)
+      return
+    }
+    if (!snapshot.release) {
+      publish({
+        ...restState,
+        revalidating: false,
+        updateAvailable: false,
+        availableReleaseId: undefined,
+        message: 'Local Edge 已激活，但还没有可用 release。',
+      })
+      return
+    }
+
+    const activeReleaseId = snapshot.release.releaseId
+    if (!restState.releaseId) {
+      publishSnapshot(snapshot)
+      return
+    }
+    if (restState.releaseId === activeReleaseId) {
+      publish({
+        ...restState,
+        revalidating: false,
+        updateAvailable: false,
+        availableReleaseId: undefined,
+      })
+      return
+    }
+
+    publish({
+      ...restState,
+      phase: 'ready',
+      controlled: true,
+      revalidating: false,
+      availableReleaseId: activeReleaseId,
+      updateAvailable: true,
+      message:
+        restState.availableReleaseId === activeReleaseId &&
+        restState.updateAvailable
+          ? restState.message
+          : '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。',
+    })
   }
 
   const requestRevalidation = async () => {
@@ -426,6 +502,43 @@ export function createLocalEdgeDocumentRuntime(
     void readAndPublishSnapshot().catch(publishRuntimeError)
   }
 
+  const handleKernelMessage = (event: MessageEvent) => {
+    const source = event.source
+    if (!source || typeof source !== 'object') {
+      return
+    }
+    const sourceScriptUrl = (source as { scriptURL?: unknown }).scriptURL
+    if (
+      typeof sourceScriptUrl !== 'string' ||
+      new URL(sourceScriptUrl).pathname !== config.workerPath
+    ) {
+      return
+    }
+    const controller = navigator.serviceWorker?.controller
+    if (controller && controller.scriptURL !== sourceScriptUrl) {
+      return
+    }
+    if (typeof event.data !== 'object' || event.data === null) {
+      return
+    }
+
+    const payload = event.data as Record<string, unknown>
+    if (payload.type === fwaRevalidationProgressMessageType) {
+      const progress = revalidationProgressFromMessage(payload)
+      if (!progress) {
+        return
+      }
+      publish({
+        ...state,
+        revalidationProgress: progress,
+      })
+      return
+    }
+    if (payload.type === fwaRevalidationCommittedMessageType) {
+      void publishCommittedSnapshot().catch(publishRuntimeError)
+    }
+  }
+
   const handleVisibilityChange = () => {
     maybeRevalidate()
   }
@@ -453,6 +566,7 @@ export function createLocalEdgeDocumentRuntime(
       'controllerchange',
       handleControllerChange,
     )
+    navigator.serviceWorker?.addEventListener('message', handleKernelMessage)
     void startRuntime().catch(publishRuntimeError)
   }
 
@@ -465,6 +579,10 @@ export function createLocalEdgeDocumentRuntime(
     navigator.serviceWorker?.removeEventListener(
       'controllerchange',
       handleControllerChange,
+    )
+    navigator.serviceWorker?.removeEventListener(
+      'message',
+      handleKernelMessage,
     )
     unsubscribeVisibility?.()
     unsubscribeOnline?.()
@@ -549,6 +667,27 @@ function isLocalEdgeSnapshot(value: unknown): value is LocalEdgeSnapshot {
       snapshot.mode === 'disabled' ||
       snapshot.mode === 'network-only')
   )
+}
+
+function revalidationProgressFromMessage(
+  payload: Record<string, unknown>,
+): LocalEdgeRevalidationProgress | undefined {
+  const { releaseId, completedAssets, totalAssets } = payload
+  if (
+    typeof releaseId !== 'string' ||
+    !Number.isSafeInteger(completedAssets) ||
+    !Number.isSafeInteger(totalAssets) ||
+    (completedAssets as number) < 0 ||
+    (totalAssets as number) < 1 ||
+    (completedAssets as number) > (totalAssets as number)
+  ) {
+    return undefined
+  }
+  return {
+    releaseId,
+    completedAssets: completedAssets as number,
+    totalAssets: totalAssets as number,
+  }
 }
 
 function normalizeUpdateCheck(
