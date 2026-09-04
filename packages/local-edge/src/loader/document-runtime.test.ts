@@ -1021,6 +1021,22 @@ describe('createLocalEdgeDocumentRuntime', () => {
           if (requestUrl === '/__fwa/state') {
             stateCall += 1
             const releaseId = stateCall === 1 ? 'release-a' : 'release-b'
+            if (stateCall === 2) {
+              // release-c registers and broadcasts after the pull captured
+              // its kernel view but before that response is published.
+              serviceWorker.dispatchEvent(
+                kernelMessage(
+                  {
+                    type: fwaRevalidationProgressMessageType,
+                    releaseId: 'release-c',
+                    completedAssets: 3,
+                    totalAssets: 12,
+                  },
+                  controllerSource(serviceWorker),
+                ),
+              )
+              await new Promise((resolve) => setTimeout(resolve, 30))
+            }
             return Response.json(
               { localEdgeEnabled: true, mode: 'active', release: { releaseId } },
               { headers: fwaKernelStateHeaders() },
@@ -1038,23 +1054,8 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
       await settle(runtime)
 
-      // A new install of release-c starts (and broadcasts progress) while
-      // the terminal pull for the older release-b is still in flight.
-      serviceWorker.dispatchEvent(
-        kernelMessage(
-          {
-            type: fwaRevalidationProgressMessageType,
-            releaseId: 'release-c',
-            completedAssets: 3,
-            totalAssets: 12,
-          },
-          controllerSource(serviceWorker),
-        ),
-      )
-      expect(runtime.getState().revalidationProgress).toMatchObject({
-        releaseId: 'release-c',
-      })
-
+      // release-b settles; while its terminal pull is in flight, a new
+      // install of release-c registers and broadcasts from the fetch mock.
       serviceWorker.dispatchEvent(
         kernelMessage(
           {
@@ -1072,6 +1073,39 @@ describe('createLocalEdgeDocumentRuntime', () => {
       expect(runtime.getState().revalidationProgress).toMatchObject({
         releaseId: 'release-c',
         completedAssets: 3,
+      })
+    })
+
+    it('drops progress that predates another release terminal event', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      // release-b settled but this tab missed its terminal message, leaving
+      // only a stale progress value behind.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      // release-c then fails before completing any asset. Its terminal pull
+      // observes an idle kernel; release-b's pre-fetch progress is stale,
+      // not evidence of another live install.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationFailedMessageType, releaseId: 'release-c' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
       })
     })
 
@@ -1290,7 +1324,37 @@ describe('createLocalEdgeDocumentRuntime', () => {
     })
 
     it('accepts a same-release retry after a terminal event resets the baseline', async () => {
-      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      let stateCall = 0
+      let resolveTerminalPull!: (response: Response) => void
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            if (stateCall === 1) {
+              return Response.json(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                { headers: fwaKernelStateHeaders() },
+              )
+            }
+            return new Promise<Response>((resolve) => {
+              resolveTerminalPull = resolve
+            })
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-a' },
+              status: 'current',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
       await settle(runtime)
 
       // The first attempt of release-b reaches 7 assets and then fails.
@@ -1315,9 +1379,15 @@ describe('createLocalEdgeDocumentRuntime', () => {
           controllerSource(serviceWorker),
         ),
       )
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+      await vi.waitFor(() => {
+        expect(stateCall).toBe(2)
+      })
 
-      // The retry starts from zero: its first count must be accepted
-      // synchronously, before the terminal pull resolves.
+      // The terminal pull captured an idle kernel view, then the retry
+      // registered and broadcast its first count while that fetch remained
+      // in flight. Its count must be accepted from zero and survive the
+      // stale pull response.
       serviceWorker.dispatchEvent(
         kernelMessage(
           {
@@ -1333,18 +1403,18 @@ describe('createLocalEdgeDocumentRuntime', () => {
         completedAssets: 1,
       })
 
-      // The terminal pull resolves after the retry started: its snapshot
-      // reports no running install (the fetch raced the retry's
-      // registration), but the retry's live progress must survive it.
-      const stateCallsBefore = fetchMock.mock.calls.filter(
-        (call) => String(call[0]) === '/__fwa/state',
-      ).length
+      resolveTerminalPull(
+        Response.json(
+          {
+            localEdgeEnabled: true,
+            mode: 'active',
+            release: { releaseId: 'release-b' },
+          },
+          { headers: fwaKernelStateHeaders() },
+        ),
+      )
       await vi.waitFor(() => {
-        expect(
-          fetchMock.mock.calls.filter(
-            (call) => String(call[0]) === '/__fwa/state',
-          ).length,
-        ).toBeGreaterThan(stateCallsBefore)
+        expect(runtime.getState().updateAvailable).toBe(true)
       })
       expect(runtime.getState().revalidationProgress).toMatchObject({
         releaseId: 'release-b',

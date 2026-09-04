@@ -243,9 +243,7 @@ export function createLocalEdgeDocumentRuntime(
   // pulls share the same serialization.
   const enqueueSnapshotRead = (warning?: string) => {
     settlePullChain = settlePullChain.then(() =>
-      publishSettledSnapshot({
-        warning,
-      }).catch(publishRuntimeError),
+      publishSettledSnapshot(warning).catch(publishRuntimeError),
     )
     return settlePullChain
   }
@@ -257,24 +255,19 @@ export function createLocalEdgeDocumentRuntime(
   // available update. Settle publishes never touch the document-owned
   // `revalidating` flag and re-read the current state after the await, so a
   // revalidate() that started while the pull was in flight keeps its
-  // activity. When the caller already dropped the settled attempt's baseline
-  // synchronously (a terminal message, or an own-install response), progress
-  // present at pull time belongs to a newer attempt — including a same-
-  // release retry — and survives even when the fetched snapshot raced the
-  // retry's registration. Otherwise progress for the settled release is
-  // dropped; progress for an install that is still running — or reported by
-  // the fetched snapshot — survives the settle. A document opened through an
-  // explicit network open (?__fwa=network) stays on the network baseline by
-  // contract and drops progress without pulling the kernel.
-  const publishSettledSnapshot = async ({
-    settledReleaseId,
-    baselineDropped,
-    warning,
-  }: {
-    settledReleaseId?: string
-    baselineDropped?: boolean
-    warning?: string
-  }) => {
+  // activity. A fetched running install is the freshest kernel observation
+  // and wins, never regressing below what the document already shows; a
+  // snapshot read that predates its release's settle does not resurrect
+  // the counts the terminal message already dropped. When the snapshot
+  // reports no install, the document's progress survives only when it
+  // was published while the fetch was in flight: the kernel registers an
+  // install before broadcasting it, so a live install that raced the
+  // fetch's read necessarily broadcasts after the fetch began, while
+  // progress that predates the fetch with an idle snapshot is provably
+  // stale. A document opened through an explicit network open
+  // (?__fwa=network) stays on the network baseline by contract and drops
+  // progress without pulling the kernel.
+  const publishSettledSnapshot = async (warning?: string) => {
     if (explicitNetworkOpen) {
       const { revalidationProgress: _dropped, ...rest } = state
       void _dropped
@@ -301,13 +294,10 @@ export function createLocalEdgeDocumentRuntime(
       return
     }
 
-    // The settled release's progress is stale and must go; a newer
-    // install's progress belongs to a kernel-level install that may still
-    // be running and stays. When the fetched snapshot itself reports a
-    // running install, its value is the freshest kernel observation and
-    // wins (never regressing below what the document already shows). A
-    // snapshot read that predates its release's settle does not resurrect
-    // the counts the terminal message already dropped.
+    // The settled release's progress is stale and must go; a live
+    // install that the snapshot missed broadcasts again and re-publishes
+    // itself, so dropping a pre-fetch value with an idle snapshot cannot
+    // lose live progress.
     const currentProgress = state.revalidationProgress
     const settledProgress =
       snapshot.revalidation &&
@@ -320,15 +310,9 @@ export function createLocalEdgeDocumentRuntime(
           currentProgress.completedAssets <= settledProgress.completedAssets)
         ? settledProgress
         : currentProgress
-      : baselineDropped
+      : progressEventSeq !== progressSeqAtStart
         ? currentProgress
-        : currentProgress && progressEventSeq !== progressSeqAtStart
-          ? currentProgress
-          : currentProgress &&
-              settledReleaseId &&
-              currentProgress.releaseId !== settledReleaseId
-            ? currentProgress
-            : undefined
+        : undefined
     const { revalidationProgress: _merged, ...restState } = state
     void _merged
     const publishSettled = (value: LocalEdgeClientState) => {
@@ -455,10 +439,7 @@ export function createLocalEdgeDocumentRuntime(
         let pullFailed = false
         settlePullChain = settlePullChain.then(async () => {
           try {
-            await publishSettledSnapshot({
-              settledReleaseId: availableReleaseId,
-              baselineDropped: true,
-            })
+            await publishSettledSnapshot()
           } catch (error) {
             pullFailed = true
             publishRuntimeError(error)
@@ -756,14 +737,11 @@ export function createLocalEdgeDocumentRuntime(
         publish({ ...state, revalidationProgress: undefined })
       }
       // Terminal pulls are serialized: an earlier settle response can never
-      // overwrite the result of a later terminal message. The settled release
-      // id lets the pull drop only that release's progress and keep the
-      // progress of an install that is still running.
+      // overwrite the result of a later terminal message. A successful idle
+      // snapshot clears progress that predates its fetch; progress arriving
+      // while the fetch is in flight survives as newer evidence.
       settlePullChain = settlePullChain.then(() =>
-        publishSettledSnapshot({
-          settledReleaseId,
-          baselineDropped: settledReleaseId !== undefined,
-        }).catch(publishRuntimeError),
+        publishSettledSnapshot().catch(publishRuntimeError),
       )
     }
   }
