@@ -1517,6 +1517,56 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('does not let the startup snapshot resurrect progress settled mid-read', async () => {
+      let stateCall = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            if (stateCall === 1) {
+              // The release settles while the startup read is in flight;
+              // the fetch still captured the settled attempt's counts.
+              serviceWorker.dispatchEvent(
+                kernelMessage(
+                  {
+                    type: fwaRevalidationCommittedMessageType,
+                    releaseId: 'release-b',
+                  },
+                  controllerSource(serviceWorker),
+                ),
+              )
+            }
+            await new Promise((resolve) => setTimeout(resolve, 30))
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+                revalidation: {
+                  releaseId: 'release-b',
+                  completedAssets: 5,
+                  totalAssets: 10,
+                },
+              },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-a' },
+              status: 'current',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+    })
+
     it('keeps a document-owned revalidate flag when a settle pull lands mid-revalidate', async () => {
       const { runtime, serviceWorker, fetchMock } = createControlledKernel({
         scheduledResponse: new Promise<Response>(() => {}),

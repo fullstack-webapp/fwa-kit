@@ -84,6 +84,15 @@ export function createLocalEdgeDocumentRuntime(
   let state = initialState
   let explicitNetworkOpen = false
   let settlePullChain: Promise<void> = Promise.resolve()
+  // Progress fetched from the kernel is void for a release whose install
+  // settled after the fetch began: a snapshot read that predates the settle
+  // can still carry the settled attempt's counts, and publishing it would
+  // resurrect progress that the terminal message already dropped. Terminal
+  // messages mark their release with the current sequence number; fetch
+  // publishers capture the sequence before awaiting and discard fetched
+  // progress for any release marked later than that.
+  let kernelEventSeq = 0
+  const settledAtSeq = new Map<string, number>()
   let started = false
   let stopped = false
   let scheduledChecksStarted = false
@@ -126,6 +135,14 @@ export function createLocalEdgeDocumentRuntime(
       publishToListener(listener, state)
     }
   }
+  const progressSettledDuringFetch = (
+    progress: LocalEdgeRevalidationProgress,
+    startedAtSeq: number,
+  ) => {
+    const settledSeq = settledAtSeq.get(progress.releaseId)
+    return settledSeq !== undefined && settledSeq > startedAtSeq
+  }
+
   const fetchKernelSnapshot = async () => {
     if (!navigator.serviceWorker.controller) {
       return undefined
@@ -152,11 +169,21 @@ export function createLocalEdgeDocumentRuntime(
     return snapshot
   }
 
-  const publishSnapshot = (snapshot: LocalEdgeSnapshot, warning?: string) => {
+  const publishSnapshot = (
+    snapshot: LocalEdgeSnapshot,
+    startedAtSeq: number,
+    warning?: string,
+  ) => {
     // A progress message can land while the fetch is in flight (the message
     // channel is not serialized on the read chain): publish the freshest
-    // count, never a stale snapshot's regression.
-    const fetchedProgress = snapshot.revalidation
+    // count, never a stale snapshot's regression. A snapshot read that
+    // predates its release's settle does not resurrect the counts the
+    // terminal message already dropped.
+    const fetchedProgress =
+      snapshot.revalidation &&
+      !progressSettledDuringFetch(snapshot.revalidation, startedAtSeq)
+        ? snapshot.revalidation
+        : undefined
     const currentProgress = state.revalidationProgress
     const revalidationProgress = fetchedProgress
       ? !currentProgress ||
@@ -253,6 +280,7 @@ export function createLocalEdgeDocumentRuntime(
       )
       return
     }
+    const startedAtSeq = kernelEventSeq
     const snapshot = await fetchKernelSnapshot()
     if (!snapshot) {
       publish({
@@ -271,9 +299,15 @@ export function createLocalEdgeDocumentRuntime(
     // install's progress belongs to a kernel-level install that may still
     // be running and stays. When the fetched snapshot itself reports a
     // running install, its value is the freshest kernel observation and
-    // wins (never regressing below what the document already shows).
+    // wins (never regressing below what the document already shows). A
+    // snapshot read that predates its release's settle does not resurrect
+    // the counts the terminal message already dropped.
     const currentProgress = state.revalidationProgress
-    const settledProgress = snapshot.revalidation
+    const settledProgress =
+      snapshot.revalidation &&
+      !progressSettledDuringFetch(snapshot.revalidation, startedAtSeq)
+        ? snapshot.revalidation
+        : undefined
     const mergedProgress = settledProgress
       ? (!currentProgress ||
           currentProgress.releaseId !== settledProgress.releaseId ||
@@ -573,6 +607,7 @@ export function createLocalEdgeDocumentRuntime(
       await (settlePullChain = settlePullChain.then(async () => {
         try {
           let snapshot: LocalEdgeSnapshot | undefined
+          const startedAtSeq = kernelEventSeq
           try {
             snapshot = await fetchKernelSnapshot()
           } catch {
@@ -601,7 +636,7 @@ export function createLocalEdgeDocumentRuntime(
           }
 
           clearTakeoverAttempt(config.workerPath)
-          publishSnapshot(snapshot)
+          publishSnapshot(snapshot, startedAtSeq)
           snapshotPublished = true
         } catch (error) {
           startupError = error
@@ -685,7 +720,13 @@ export function createLocalEdgeDocumentRuntime(
       // A retry or repair of the same release restarts from zero: drop the
       // settled attempt's baseline synchronously, before the ordered pull
       // runs, so the monotonic guard does not reject the retry's early
-      // counts while the pull is still pending.
+      // counts while the pull is still pending. The settle is also marked
+      // with the current sequence number so in-flight snapshot reads cannot
+      // resurrect this attempt's counts after they were dropped.
+      kernelEventSeq += 1
+      if (settledReleaseId) {
+        settledAtSeq.set(settledReleaseId, kernelEventSeq)
+      }
       if (
         settledReleaseId &&
         state.revalidationProgress?.releaseId === settledReleaseId
