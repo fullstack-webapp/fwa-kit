@@ -1010,6 +1010,40 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('keeps a document-owned revalidate flag when a settle pull lands mid-revalidate', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({
+        scheduledResponse: new Promise<Response>(() => {}),
+      })
+      await settle(runtime)
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidating).toBe(false)
+      })
+
+      void runtime.revalidate()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidating).toBe(true)
+      })
+
+      const stateFetchCallsBefore = fetchMock.mock.calls.filter(
+        (call) => String(call[0]) === '/__fwa/state',
+      ).length
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-a' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter((call) => String(call[0]) === '/__fwa/state')
+            .length,
+        ).toBeGreaterThan(stateFetchCallsBefore)
+      })
+
+      expect(runtime.getState().updateAvailable).toBe(false)
+      expect(runtime.getState().revalidating).toBe(true)
+    })
+
     it('keeps an explicitly network-opened document on the network baseline when a commit settles', async () => {
       const { runtime, serviceWorker } = createControlledKernel({
         documentHref: 'https://app.example/?__fwa=network',

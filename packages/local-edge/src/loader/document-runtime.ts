@@ -214,17 +214,21 @@ export function createLocalEdgeDocumentRuntime(
   // window client, including the document whose own revalidate just settled.
   // The pull must not relabel the running document: keep the loaded releaseId
   // and only surface a kernel active release that differs from it as an
-  // available update. A document opened through an explicit network open
+  // available update. Settle publishes never touch the document-owned
+  // `revalidating` flag and re-read the current state after the await, so a
+  // revalidate() that started while the pull was in flight keeps its
+  // activity. A document opened through an explicit network open
   // (?__fwa=network) stays on the network baseline by contract and only
   // drops stale progress.
   const publishSettledSnapshot = async () => {
-    const { revalidationProgress: _droppedProgress, ...restState } = state
-    void _droppedProgress
+    const dropStaleProgress = (value: LocalEdgeClientState) => {
+      const { revalidationProgress: _dropped, ...rest } = value
+      void _dropped
+      return rest
+    }
+
     if (explicitNetworkOpen) {
-      publish({
-        ...restState,
-        revalidating: false,
-      })
+      publish(dropStaleProgress(state))
       return
     }
     const snapshot = await fetchKernelSnapshot()
@@ -238,14 +242,28 @@ export function createLocalEdgeDocumentRuntime(
       })
       return
     }
+
+    const restState = dropStaleProgress(state)
+
     if (snapshot.mode !== 'active') {
-      publishSnapshot(snapshot)
+      const { releaseId: _droppedReleaseId, ...restWithoutReleaseId } = restState
+      void _droppedReleaseId
+      publish({
+        ...restWithoutReleaseId,
+        phase: 'network-only',
+        controlled: true,
+        updateAvailable: false,
+        availableReleaseId: undefined,
+        message:
+          snapshot.mode === 'disabled'
+            ? 'Local Edge 已由 release flag 禁用，当前使用 network baseline。'
+            : 'Local Edge 已激活，但还没有可用 release。',
+      })
       return
     }
     if (!snapshot.release) {
       publish({
         ...restState,
-        revalidating: false,
         updateAvailable: false,
         availableReleaseId: undefined,
         message: 'Local Edge 已激活，但还没有可用 release。',
@@ -255,13 +273,20 @@ export function createLocalEdgeDocumentRuntime(
 
     const activeReleaseId = snapshot.release.releaseId
     if (!restState.releaseId) {
-      publishSnapshot(snapshot)
+      publish({
+        ...restState,
+        phase: 'ready',
+        controlled: true,
+        releaseId: activeReleaseId,
+        updateAvailable: false,
+        availableReleaseId: undefined,
+        message: '本地 release 已提交，navigation 可以从 Cache Storage 启动。',
+      })
       return
     }
     if (restState.releaseId === activeReleaseId) {
       publish({
         ...restState,
-        revalidating: false,
         updateAvailable: false,
         availableReleaseId: undefined,
       })
@@ -272,7 +297,6 @@ export function createLocalEdgeDocumentRuntime(
       ...restState,
       phase: 'ready',
       controlled: true,
-      revalidating: false,
       availableReleaseId: activeReleaseId,
       updateAvailable: true,
       message:
