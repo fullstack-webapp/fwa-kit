@@ -67,6 +67,15 @@ export async function revalidateReleaseForClient(clientId: string) {
 }
 
 export async function getLocalEdgeSnapshot(): Promise<LocalEdgeSnapshot> {
+  if (resetStarted) {
+    // This worker instance is being torn down by a reset: answer from memory
+    // only so a stray post-reset pull can never re-create the metadata
+    // database the reset just deleted.
+    return {
+      localEdgeEnabled: false,
+      mode: 'network-only',
+    }
+  }
   const enabled = await isLocalEdgeRuntimeEnabled()
   const releaseState = await readReleaseState()
   const revalidation = revalidationInstall?.progress
@@ -114,6 +123,10 @@ export function resetReleaseRuntime() {
     resetInFlight = finishReset()
   }
   return resetInFlight
+}
+
+export function hasResetStarted() {
+  return resetStarted
 }
 
 export async function selectRequestRelease(event: FetchEvent) {
@@ -293,12 +306,11 @@ async function revalidateRelease(signal: AbortSignal) {
       release,
     } satisfies LocalEdgeRevalidationResult
   } catch (error) {
-    // An aborted install is part of a reset takeover: the kernel is being
-    // torn down and clients learn about it through registration events, so
-    // do not invite them to re-pull state from a vanishing worker.
-    if (!signal.aborted) {
-      await broadcastRevalidationFailed(release.releaseId)
-    }
+    // Broadcast the terminal event even for an aborted install: other
+    // controlled windows keep their last progress value otherwise. The
+    // post-reset snapshot endpoint answers from memory, so the pull this
+    // triggers cannot re-create the deleted metadata database.
+    await broadcastRevalidationFailed(release.releaseId)
     if (!isRepairingActive && !isKnownRetained) {
       await caches.delete(candidateCacheName)
     }

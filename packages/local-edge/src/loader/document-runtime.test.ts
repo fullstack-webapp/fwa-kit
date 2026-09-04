@@ -1062,6 +1062,33 @@ describe('createLocalEdgeDocumentRuntime', () => {
       expect(runtime.getState().revalidationProgress).toBeUndefined()
     })
 
+    it('still pulls for an ordinary network-only document that is not an explicit network open', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({
+        snapshotMode: 'disabled',
+      })
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          controlled: true,
+        })
+      })
+
+      const fetchCallsBefore = fetchMock.mock.calls.length
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(fetchMock.mock.calls.length).toBeGreaterThan(fetchCallsBefore)
+      })
+      expect(runtime.getState()).toMatchObject({
+        phase: 'network-only',
+        controlled: true,
+      })
+    })
+
     it('drops progress and re-pulls the snapshot after a failed install message', async () => {
       const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
       await settle(runtime)

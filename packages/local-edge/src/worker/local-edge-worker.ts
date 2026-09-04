@@ -19,6 +19,7 @@ import {
   activateReleaseRuntime,
   getLocalEdgeSnapshot,
   isReleaseComplete,
+  hasResetStarted,
   isLocalEdgeRuntimeEnabled,
   pinRequestClient,
   readReleaseAsset,
@@ -77,6 +78,13 @@ async function handleRequest(event: FetchEvent) {
   }
   if (navigationMode === 'network' && request.mode === 'navigate') {
     return fetch(request, { cache: 'reload' })
+  }
+
+  if (hasResetStarted()) {
+    // A reset tears this worker instance down: remaining app requests pass
+    // through to the network without touching (and never re-creating) the
+    // metadata database the reset just deleted.
+    return fetch(request)
   }
 
   if (await usesNetworkOnlyClient(event.clientId)) {

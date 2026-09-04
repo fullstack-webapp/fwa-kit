@@ -196,7 +196,7 @@ describe('release-runtime candidate install progress', () => {
     ).toBe(true)
   })
 
-  it('does not broadcast failed when reset aborts the install', async () => {
+  it('broadcasts failed when reset aborts the install', async () => {
     const never = new Promise<void>(() => {})
     verifierState.gateAssets = never
 
@@ -206,13 +206,17 @@ describe('release-runtime candidate install progress', () => {
     await runtime.resetReleaseRuntime()
     await expect(revalidation).rejects.toThrow()
 
+    const releaseId = (verifierState.descriptor as {
+      release?: { releaseId: string }
+    }).release?.releaseId
     expect(
       client.postMessage.mock.calls.some(
         (call: unknown[]) =>
-          (call[0] as { type?: string } | undefined)?.type ===
-          '__fwa:revalidation-failed',
+          (call[0] as { type?: string; releaseId?: string })?.type ===
+            '__fwa:revalidation-failed' &&
+          (call[0] as { releaseId?: string }).releaseId === releaseId,
       ),
-    ).toBe(false)
+    ).toBe(true)
     expect(
       client.postMessage.mock.calls.some(
         (call: unknown[]) =>
@@ -220,6 +224,32 @@ describe('release-runtime candidate install progress', () => {
           '__fwa:revalidation-committed',
       ),
     ).toBe(false)
+  })
+
+  it('answers post-reset snapshots from memory without touching metadata', async () => {
+    const metadata = await import('./release-metadata.ts')
+    await runtime.revalidateReleaseForClient('window-1')
+    await runtime.resetReleaseRuntime()
+    const readCallsAfterReset = vi.mocked(metadata.readReleaseState).mock.calls
+      .length
+
+    const snapshot = await runtime.getLocalEdgeSnapshot()
+
+    expect(snapshot).toEqual({
+      localEdgeEnabled: false,
+      mode: 'network-only',
+    })
+    expect(vi.mocked(metadata.readReleaseState).mock.calls.length).toBe(
+      readCallsAfterReset,
+    )
+  })
+
+  it('rejects revalidation attempts after a reset', async () => {
+    await runtime.resetReleaseRuntime()
+
+    await expect(
+      runtime.revalidateReleaseForClient('window-1'),
+    ).rejects.toThrow('release runtime is resetting')
   })
 
   it('does not broadcast failed when the descriptor fetch fails before an install starts', async () => {

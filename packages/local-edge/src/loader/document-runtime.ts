@@ -82,6 +82,7 @@ export function createLocalEdgeDocumentRuntime(
   const controlPaths = localEdgeControlPathsFor(config)
   const listeners = new Set<LocalEdgeStateListener>()
   let state = initialState
+  let explicitNetworkOpen = false
   let started = false
   let stopped = false
   let scheduledChecksStarted = false
@@ -213,12 +214,13 @@ export function createLocalEdgeDocumentRuntime(
   // window client, including the document whose own revalidate just settled.
   // The pull must not relabel the running document: keep the loaded releaseId
   // and only surface a kernel active release that differs from it as an
-  // available update. An explicitly network-opened document stays on the
-  // network baseline by contract and only drops stale progress.
+  // available update. A document opened through an explicit network open
+  // (?__fwa=network) stays on the network baseline by contract and only
+  // drops stale progress.
   const publishSettledSnapshot = async () => {
     const { revalidationProgress: _droppedProgress, ...restState } = state
     void _droppedProgress
-    if (restState.phase === 'network-only') {
+    if (explicitNetworkOpen) {
       publish({
         ...restState,
         revalidating: false,
@@ -445,6 +447,7 @@ export function createLocalEdgeDocumentRuntime(
 
     const navigationMode = localEdgeNavigationModeFor(new URL(window.location.href))
     if (navigationMode === 'network') {
+      explicitNetworkOpen = true
       publish({
         phase: 'network-only',
         controlled: Boolean(navigator.serviceWorker.controller),
