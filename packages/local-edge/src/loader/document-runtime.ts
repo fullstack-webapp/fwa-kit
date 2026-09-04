@@ -200,7 +200,9 @@ export function createLocalEdgeDocumentRuntime(
   // pulls share the same serialization.
   const enqueueSnapshotRead = (warning?: string) => {
     settlePullChain = settlePullChain.then(() =>
-      publishSettledSnapshot(undefined, warning).catch(publishRuntimeError),
+      publishSettledSnapshot({
+        warning,
+      }).catch(publishRuntimeError),
     )
     return settlePullChain
   }
@@ -212,15 +214,24 @@ export function createLocalEdgeDocumentRuntime(
   // available update. Settle publishes never touch the document-owned
   // `revalidating` flag and re-read the current state after the await, so a
   // revalidate() that started while the pull was in flight keeps its
-  // activity. Progress for the settled release is dropped; progress for an
-  // install that is still running — or reported by the fetched snapshot —
-  // survives the settle. A document opened through an explicit network open
-  // (?__fwa=network) stays on the network baseline by contract and drops
-  // progress without pulling the kernel.
-  const publishSettledSnapshot = async (
-    settledReleaseId?: string,
-    warning?: string,
-  ) => {
+  // activity. When the caller already dropped the settled attempt's baseline
+  // synchronously (a terminal message, or an own-install response), progress
+  // present at pull time belongs to a newer attempt — including a same-
+  // release retry — and survives even when the fetched snapshot raced the
+  // retry's registration. Otherwise progress for the settled release is
+  // dropped; progress for an install that is still running — or reported by
+  // the fetched snapshot — survives the settle. A document opened through an
+  // explicit network open (?__fwa=network) stays on the network baseline by
+  // contract and drops progress without pulling the kernel.
+  const publishSettledSnapshot = async ({
+    settledReleaseId,
+    baselineDropped,
+    warning,
+  }: {
+    settledReleaseId?: string
+    baselineDropped?: boolean
+    warning?: string
+  }) => {
     if (explicitNetworkOpen) {
       const { revalidationProgress: _dropped, ...rest } = state
       void _dropped
@@ -258,11 +269,13 @@ export function createLocalEdgeDocumentRuntime(
           currentProgress.completedAssets <= settledProgress.completedAssets)
         ? settledProgress
         : currentProgress
-      : currentProgress &&
-          settledReleaseId &&
-          currentProgress.releaseId !== settledReleaseId
+      : baselineDropped
         ? currentProgress
-        : undefined
+        : currentProgress &&
+            settledReleaseId &&
+            currentProgress.releaseId !== settledReleaseId
+          ? currentProgress
+          : undefined
     const { revalidationProgress: _merged, ...restState } = state
     void _merged
     const publishSettled = (value: LocalEdgeClientState) => {
@@ -380,11 +393,18 @@ export function createLocalEdgeDocumentRuntime(
         // this response was pending must not be overwritten by the older
         // release this result carries. The public promise keeps its state
         // semantics: the announcement is visible once await revalidate()
-        // resolves.
+        // resolves. The own install's progress baseline is dropped here,
+        // before the pull, so the pull keeps only newer attempts' progress.
+        if (state.revalidationProgress?.releaseId === availableReleaseId) {
+          publish({ ...state, revalidationProgress: undefined })
+        }
         let releasePull!: () => void
         settlePullChain = settlePullChain.then(async () => {
           try {
-            await publishSettledSnapshot(availableReleaseId)
+            await publishSettledSnapshot({
+              settledReleaseId: availableReleaseId,
+              baselineDropped: true,
+            })
           } catch (error) {
             publishRuntimeError(error)
           } finally {
@@ -666,7 +686,10 @@ export function createLocalEdgeDocumentRuntime(
       // id lets the pull drop only that release's progress and keep the
       // progress of an install that is still running.
       settlePullChain = settlePullChain.then(() =>
-        publishSettledSnapshot(settledReleaseId).catch(publishRuntimeError),
+        publishSettledSnapshot({
+          settledReleaseId,
+          baselineDropped: settledReleaseId !== undefined,
+        }).catch(publishRuntimeError),
       )
     }
   }

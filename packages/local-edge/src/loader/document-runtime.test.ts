@@ -1243,7 +1243,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
     })
 
     it('accepts a same-release retry after a terminal event resets the baseline', async () => {
-      const { runtime, serviceWorker } = createControlledKernel({})
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
       await settle(runtime)
 
       // The first attempt of release-b reaches 7 assets and then fails.
@@ -1283,6 +1283,24 @@ describe('createLocalEdgeDocumentRuntime', () => {
         ),
       )
       expect(runtime.getState().revalidationProgress).toMatchObject({
+        completedAssets: 1,
+      })
+
+      // The terminal pull resolves after the retry started: its snapshot
+      // reports no running install (the fetch raced the retry's
+      // registration), but the retry's live progress must survive it.
+      const stateCallsBefore = fetchMock.mock.calls.filter(
+        (call) => String(call[0]) === '/__fwa/state',
+      ).length
+      await vi.waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(
+            (call) => String(call[0]) === '/__fwa/state',
+          ).length,
+        ).toBeGreaterThan(stateCallsBefore)
+      })
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        releaseId: 'release-b',
         completedAssets: 1,
       })
     })
