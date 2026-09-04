@@ -50,8 +50,6 @@ unsubscribe?.()
 | `getState()` | Read the current document state |
 | `subscribe(listener)` | Emit immediately and on later state changes |
 | `revalidate()` | Check and install a candidate; return `current`, `updated`, `failed`, or `disabled` |
-
-An `updated` result never announces from the response payload: the loader pulls the kernel's state endpoint through the same ordered chain as terminal-message pulls, so the announcement reflects the kernel's current active release and a commit that landed in another tab while the response was pending cannot be overwritten by the older release the result carries. All kernel-observation reads — startup, controller-change, response-driven, and terminal-message pulls — share this ordering, so an older fetch can never overwrite a newer observation.
 | `setUpdateCheck(config)` | Change the enabled state or interval (1–35,791 minutes) for the current document without persistence |
 | `applyUpdate()` | Reload only when a complete update is available |
 | `reset()` | Clear Local Edge-owned state and enter network mode |
@@ -59,6 +57,8 @@ An `updated` result never announces from the response payload: the loader pulls 
 | `openNetwork()` | Navigate to `networkUrl()` |
 | `paths` | Read the derived scope, worker, descriptor, and control paths |
 | `debug.*` | Read, subscribe to, and change diagnostics state without navigation |
+
+An `updated` result never announces from the response payload: the loader pulls the kernel's state endpoint through the same ordered chain as terminal-message pulls, so the announcement reflects the kernel's current active release and a commit that landed in another tab while the response was pending cannot be overwritten by the older release the result carries. The silent first-install (`installed`/`enabled`) claim derives from the same ordered fresh-snapshot read. All kernel-observation reads — startup, controller-change, response-driven, and terminal-message pulls — share this ordering, so an older fetch can never overwrite a newer observation.
 
 The package client entry exports the same facade through `getFwaLocalEdge()` without adding framework state or lifecycle ownership.
 

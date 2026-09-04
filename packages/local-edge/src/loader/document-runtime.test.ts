@@ -1156,6 +1156,92 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('does not let a delayed silent install response overwrite a newer cross-tab commit', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let stateCall = 0
+      let revalidateCall = 0
+      let resolveRevalidate: ((response: Response) => void) | undefined
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const headers = new Headers(fwaKernelStateHeaders())
+            if (stateCall === 1) {
+              return Response.json(
+                { localEdgeEnabled: true, mode: 'network-only' },
+                { headers },
+              )
+            }
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-c' },
+              },
+              { headers },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return Response.json({
+                localEdgeEnabled: true,
+                release: { releaseId: undefined },
+                status: 'current',
+              })
+            }
+            // The background tab's silent first-install response stays
+            // pending while the other tab commits.
+            return new Promise<Response>((resolve) => {
+              resolveRevalidate = resolve
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await vi.waitFor(() => {
+        expect(runtime.getState().phase).toBe('network-only')
+      })
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(resolveRevalidate).toBeDefined()
+      })
+
+      // Another tab commits release-c while this document's response is
+      // still pending; the terminal pull claims release-c for this tab.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-c' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().releaseId).toBe('release-c')
+      })
+
+      // The delayed response claims release-b: its first-install claim must
+      // derive from a fresh ordered snapshot read, not overwrite release-c.
+      resolveRevalidate?.(
+        Response.json({
+          localEdgeEnabled: true,
+          release: { releaseId: 'release-b' },
+          status: 'installed',
+        }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 30))
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-c',
+        updateAvailable: false,
+      })
+    })
+
     it('keeps a document-owned revalidate flag when a settle pull lands mid-revalidate', async () => {
       const { runtime, serviceWorker, fetchMock } = createControlledKernel({
         scheduledResponse: new Promise<Response>(() => {}),

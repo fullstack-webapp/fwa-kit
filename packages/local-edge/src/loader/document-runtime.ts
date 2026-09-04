@@ -404,11 +404,11 @@ export function createLocalEdgeDocumentRuntime(
       (result.status === 'installed' || result.status === 'enabled') &&
       result.release
     ) {
-      publishSnapshot({
-        localEdgeEnabled: true,
-        mode: 'active',
-        release: result.release,
-      })
+      // The first-install claim comes from an ordered fresh snapshot read,
+      // not from the response payload: a cross-tab commit that landed while
+      // this response was pending must not be overwritten by the older
+      // release the result carries.
+      await enqueueSnapshotRead()
     } else if (result.status !== 'current' && revalidationVisible) {
       await enqueueSnapshotRead()
     }
