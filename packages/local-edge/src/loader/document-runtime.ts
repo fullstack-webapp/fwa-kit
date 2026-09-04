@@ -126,7 +126,6 @@ export function createLocalEdgeDocumentRuntime(
       publishToListener(listener, state)
     }
   }
-
   const fetchKernelSnapshot = async () => {
     if (!navigator.serviceWorker.controller) {
       return undefined
@@ -640,12 +639,22 @@ export function createLocalEdgeDocumentRuntime(
       payload.type === fwaRevalidationCommittedMessageType ||
       payload.type === fwaRevalidationFailedMessageType
     ) {
+      const settledReleaseId =
+        typeof payload.releaseId === 'string' ? payload.releaseId : undefined
+      // A retry or repair of the same release restarts from zero: drop the
+      // settled attempt's baseline synchronously, before the ordered pull
+      // runs, so the monotonic guard does not reject the retry's early
+      // counts while the pull is still pending.
+      if (
+        settledReleaseId &&
+        state.revalidationProgress?.releaseId === settledReleaseId
+      ) {
+        publish({ ...state, revalidationProgress: undefined })
+      }
       // Terminal pulls are serialized: an earlier settle response can never
       // overwrite the result of a later terminal message. The settled release
       // id lets the pull drop only that release's progress and keep the
       // progress of an install that is still running.
-      const settledReleaseId =
-        typeof payload.releaseId === 'string' ? payload.releaseId : undefined
       settlePullChain = settlePullChain.then(() =>
         publishSettledSnapshot(settledReleaseId).catch(publishRuntimeError),
       )
@@ -742,7 +751,7 @@ export function createLocalEdgeDocumentRuntime(
   }
 
   return {
-    getState: () => ({ ...state }),
+    getState: () => exposeState(state),
     subscribe(listener) {
       listeners.add(listener)
       publishToListener(listener, state)
@@ -845,12 +854,21 @@ function clearTakeoverAttempt(workerPath: string) {
   }
 }
 
+function exposeState(value: LocalEdgeClientState): LocalEdgeClientState {
+  // The nested progress object must never be shared with subscribers by
+  // reference: a mutating consumer would corrupt the runtime's own state
+  // and with it the monotonic-progress guard.
+  return value.revalidationProgress
+    ? { ...value, revalidationProgress: { ...value.revalidationProgress } }
+    : { ...value }
+}
+
 function publishToListener(
   listener: LocalEdgeStateListener,
   state: LocalEdgeClientState,
 ) {
   try {
-    listener({ ...state })
+    listener(exposeState(state))
   } catch (error) {
     queueMicrotask(() => {
       throw error

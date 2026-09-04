@@ -1242,6 +1242,90 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('accepts a same-release retry after a terminal event resets the baseline', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      // The first attempt of release-b reaches 7 assets and then fails.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 7,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        completedAssets: 7,
+      })
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationFailedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+
+      // The retry starts from zero: its first count must be accepted
+      // synchronously, before the terminal pull resolves.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        completedAssets: 1,
+      })
+    })
+
+    it('isolates the nested progress object from consumer mutations', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      const exposed = runtime.getState()
+      ;(exposed.revalidationProgress as { completedAssets: number }).completedAssets = 99
+
+      // The runtime's own baseline is unaffected by the consumer's mutation,
+      // so the monotonic guard still accepts fresh counts.
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        completedAssets: 3,
+      })
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 4,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        completedAssets: 4,
+      })
+    })
+
     it('keeps a document-owned revalidate flag when a settle pull lands mid-revalidate', async () => {
       const { runtime, serviceWorker, fetchMock } = createControlledKernel({
         scheduledResponse: new Promise<Response>(() => {}),
