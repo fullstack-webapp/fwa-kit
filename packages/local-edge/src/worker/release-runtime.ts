@@ -40,6 +40,7 @@ const candidateInstallConcurrency = 8
 let revalidationInFlight: Promise<LocalEdgeRevalidationResult> | undefined
 let revalidationAbortController: AbortController | undefined
 let revalidationInstall: RevalidationInstallState | undefined
+let pendingProgressSends: Promise<unknown>[] = []
 let resetInFlight: Promise<void> | undefined
 let resetStarted = false
 let clientReleasePins: Map<string, string> | undefined
@@ -294,6 +295,12 @@ async function revalidateRelease(signal: AbortSignal) {
       },
       { clearCandidate: true, localEdgeEnabled: true },
     )
+    // The install is settled: clear the progress state and drain the
+    // best-effort progress sends before the terminal broadcast, so a client
+    // reacting to the terminal event can never observe or re-publish a
+    // stale progress value.
+    revalidationInstall = undefined
+    await drainProgressSends()
     try {
       await broadcastRevalidationCommitted(release.releaseId)
     } catch {
@@ -313,8 +320,12 @@ async function revalidateRelease(signal: AbortSignal) {
   } catch (error) {
     // Broadcast the terminal event even for an aborted install: other
     // controlled windows keep their last progress value otherwise. The
-    // post-reset snapshot endpoint answers from memory, so the pull this
-    // triggers cannot re-create the deleted metadata database.
+    // in-memory progress is cleared and the pending sends drained first, so
+    // the pull this triggers can never observe or re-publish stale progress,
+    // and the post-reset snapshot endpoint answers from memory so it can
+    // never re-create the deleted metadata database.
+    revalidationInstall = undefined
+    await drainProgressSends()
     await broadcastRevalidationFailed(release.releaseId)
     if (!isRepairingActive && !isKnownRetained) {
       await caches.delete(candidateCacheName)
@@ -533,12 +544,20 @@ function recordCandidateInstallProgress() {
   if (!shouldBroadcast || !progress) {
     return
   }
-  void broadcastToWindowClients({
-    type: fwaRevalidationProgressMessageType,
-    releaseId: progress.releaseId,
-    completedAssets: progress.completedAssets,
-    totalAssets: progress.totalAssets,
-  })
+  pendingProgressSends.push(
+    broadcastToWindowClients({
+      type: fwaRevalidationProgressMessageType,
+      releaseId: progress.releaseId,
+      completedAssets: progress.completedAssets,
+      totalAssets: progress.totalAssets,
+    }),
+  )
+}
+
+function drainProgressSends() {
+  const sends = pendingProgressSends
+  pendingProgressSends = []
+  return Promise.allSettled(sends)
 }
 
 function broadcastRevalidationFailed(releaseId: string) {

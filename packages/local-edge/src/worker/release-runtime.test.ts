@@ -277,6 +277,89 @@ describe('release-runtime candidate install progress', () => {
     expect(releaseCache!.size).toBe(5)
   })
 
+  it('clears kernel progress before the committed broadcast is observable', async () => {
+    let snapshotAtCommit: Awaited<ReturnType<typeof runtime.getLocalEdgeSnapshot>> | undefined
+    client.postMessage = vi.fn(async (payload: { type?: string }) => {
+      if (payload.type === '__fwa:revalidation-committed') {
+        // A client reacting to the terminal message re-pulls the state
+        // endpoint; the kernel must already report no running install.
+        snapshotAtCommit = await runtime.getLocalEdgeSnapshot()
+      }
+      return undefined
+    })
+
+    await runtime.revalidateReleaseForClient('window-1')
+
+    expect(snapshotAtCommit).toBeDefined()
+    expect(snapshotAtCommit!.revalidation).toBeUndefined()
+  })
+
+  it('clears kernel progress before the failed broadcast is observable', async () => {
+    verifierState.assetFailure = new Error('candidate asset failed')
+    let snapshotAtFailure: Awaited<ReturnType<typeof runtime.getLocalEdgeSnapshot>> | undefined
+    client.postMessage = vi.fn(async (payload: { type?: string }) => {
+      if (payload.type === '__fwa:revalidation-failed') {
+        snapshotAtFailure = await runtime.getLocalEdgeSnapshot()
+      }
+      return undefined
+    })
+
+    await expect(
+      runtime.revalidateReleaseForClient('window-1'),
+    ).rejects.toThrow('candidate asset failed')
+
+    expect(snapshotAtFailure).toBeDefined()
+    expect(snapshotAtFailure!.revalidation).toBeUndefined()
+  })
+
+  it('drains pending progress sends before the committed broadcast', async () => {
+    vi.resetModules()
+    verifierState.descriptor = makeReleaseDescriptor(3)
+    const delayedClient = { id: 'window-1', postMessage: vi.fn() }
+    let matchAllCalls = 0
+    vi.stubGlobal('self', {
+      clients: {
+        matchAll: vi.fn(async () => {
+          matchAllCalls += 1
+          if (matchAllCalls === 1) {
+            // The first progress send is slow: without draining the pending
+            // sends, the committed broadcast would overtake it and a client
+            // could receive stale progress after the terminal event.
+            await new Promise((resolve) => setTimeout(resolve, 30))
+          }
+          return [delayedClient]
+        }),
+      },
+      location: { origin: 'https://app.test' },
+    })
+    const cacheStoreForDrain = new Map<string, Map<string, Response>>()
+    vi.stubGlobal('caches', {
+      has: vi.fn(async (name: string) => cacheStoreForDrain.has(name)),
+      open: vi.fn(async (name: string) => {
+        if (!cacheStoreForDrain.has(name)) {
+          cacheStoreForDrain.set(name, new Map())
+        }
+        const entries = cacheStoreForDrain.get(name)!
+        return {
+          put: vi.fn(async (path: string, response: Response) => {
+            entries.set(path, response)
+          }),
+          match: vi.fn(async (path: string) => entries.get(path)),
+        }
+      }),
+      keys: vi.fn(async () => [...cacheStoreForDrain.keys()]),
+      delete: vi.fn(async (name: string) => cacheStoreForDrain.delete(name)),
+    })
+
+    const fresh = await import('./release-runtime.ts')
+    await fresh.revalidateReleaseForClient('window-1')
+
+    const types = delayedClient.postMessage.mock.calls.map(
+      ([payload]) => (payload as { type?: string }).type,
+    )
+    expect(types[types.length - 1]).toBe('__fwa:revalidation-committed')
+  })
+
   it('does not broadcast failed when the descriptor fetch fails before an install starts', async () => {
     verifierState.failure = new Error('descriptor fetch failed')
 
