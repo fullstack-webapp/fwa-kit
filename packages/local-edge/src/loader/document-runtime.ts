@@ -452,6 +452,7 @@ export function createLocalEdgeDocumentRuntime(
           publish({ ...state, revalidationProgress: undefined })
         }
         let releasePull!: () => void
+        let pullFailed = false
         settlePullChain = settlePullChain.then(async () => {
           try {
             await publishSettledSnapshot({
@@ -459,6 +460,7 @@ export function createLocalEdgeDocumentRuntime(
               baselineDropped: true,
             })
           } catch (error) {
+            pullFailed = true
             publishRuntimeError(error)
           } finally {
             releasePull()
@@ -467,6 +469,13 @@ export function createLocalEdgeDocumentRuntime(
         await new Promise<void>((resolve) => {
           releasePull = resolve
         })
+        // The guarantee is "the announcement is visible once await
+        // revalidate() resolves": when the ordered pull failed, nothing
+        // can be announced yet, so the call reports failure instead and
+        // callers do not try to apply an update they cannot see.
+        if (pullFailed) {
+          return 'failed' as const
+        }
         return 'updated' as const
       }
     }
@@ -478,13 +487,17 @@ export function createLocalEdgeDocumentRuntime(
     }
     if (
       !revalidationVisible &&
-      (result.status === 'installed' || result.status === 'enabled') &&
+      (result.status === 'installed' ||
+        result.status === 'enabled' ||
+        result.status === 'repaired') &&
       result.release
     ) {
       // The first-install claim comes from an ordered fresh snapshot read,
       // not from the response payload: a cross-tab commit that landed while
       // this response was pending must not be overwritten by the older
-      // release the result carries.
+      // release the result carries. A silent repair settles the same way:
+      // its progress must clear even when the best-effort terminal
+      // broadcast is lost.
       await enqueueSnapshotRead()
     } else if (result.status !== 'current' && revalidationVisible) {
       await enqueueSnapshotRead()

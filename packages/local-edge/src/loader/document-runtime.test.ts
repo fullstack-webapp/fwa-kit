@@ -1075,6 +1075,53 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('reports failure when the announcement pull fails', async () => {
+      let stateCall = 0
+      let revalidateCall = 0
+      const { runtime } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            if (stateCall === 1) {
+              return Response.json(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                { headers: fwaKernelStateHeaders() },
+              )
+            }
+            // The ordered announcement pull cannot reach the kernel.
+            throw new Error('kernel state unreachable')
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return Response.json({
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              })
+            }
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-b' },
+              status: 'updated',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      const result = await runtime.revalidate()
+
+      expect(result).toBe('failed')
+      expect(runtime.getState()).toMatchObject({ phase: 'error' })
+    })
+
     it('resolves revalidate with the announcement already visible', async () => {
       const { runtime } = createControlledKernel({
         revalidationReleaseId: 'release-b',
@@ -1531,6 +1578,38 @@ describe('createLocalEdgeDocumentRuntime', () => {
       expect(runtime.getState().revalidationProgress).toMatchObject({
         releaseId: 'release-b',
         completedAssets: 7,
+      })
+    })
+
+    it('clears progress after a silent repair settles', async () => {
+      const fakeScheduler = createFakeScheduler()
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        revalidationStatus: 'repaired',
+        revalidationReleaseId: 'release-a',
+      })
+      await settle(runtime)
+
+      // The repair's best-effort terminal broadcast is lost: only its
+      // progress arrived.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-a',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
       })
     })
 
