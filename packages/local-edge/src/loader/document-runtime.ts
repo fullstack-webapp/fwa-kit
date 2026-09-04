@@ -153,7 +153,18 @@ export function createLocalEdgeDocumentRuntime(
   }
 
   const publishSnapshot = (snapshot: LocalEdgeSnapshot, warning?: string) => {
-    const revalidationProgress = snapshot.revalidation
+    // A progress message can land while the fetch is in flight (the message
+    // channel is not serialized on the read chain): publish the freshest
+    // count, never a stale snapshot's regression.
+    const fetchedProgress = snapshot.revalidation
+    const currentProgress = state.revalidationProgress
+    const revalidationProgress = fetchedProgress
+      ? !currentProgress ||
+        currentProgress.releaseId !== fetchedProgress.releaseId ||
+        currentProgress.completedAssets <= fetchedProgress.completedAssets
+        ? fetchedProgress
+        : currentProgress
+      : currentProgress
     publish(
       snapshot.mode === 'disabled'
         ? {
