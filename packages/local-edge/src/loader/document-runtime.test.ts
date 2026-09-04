@@ -1326,6 +1326,123 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('does not relabel the document when a manual revalidate fails with an update pending', async () => {
+      let stateCall = 0
+      let revalidateCall = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const releaseId = stateCall === 1 ? 'release-a' : 'release-b'
+            return Response.json(
+              { localEdgeEnabled: true, mode: 'active', release: { releaseId } },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return Response.json({
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              })
+            }
+            return new Response('boom', { status: 503 })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          releaseId: 'release-a',
+          availableReleaseId: 'release-b',
+          updateAvailable: true,
+        })
+      })
+
+      // A manual update check fails while the kernel is active on release-b:
+      // the failure pull must keep the loaded release and the announcement.
+      await runtime.revalidate()
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+        message:
+          'Release revalidation failed; the last committed release remains active.',
+      })
+    })
+
+    it('re-syncs stale progress from the kernel when a silent check fails', async () => {
+      const fakeScheduler = createFakeScheduler()
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        scheduledFailure: true,
+      })
+      await settle(runtime)
+
+      // A terminal broadcast was lost: progress stays behind with no later
+      // event to clear it.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
+    it('re-syncs stale progress from the kernel after a current check', async () => {
+      const fakeScheduler = createFakeScheduler()
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+      })
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
     it('keeps a document-owned revalidate flag when a settle pull lands mid-revalidate', async () => {
       const { runtime, serviceWorker, fetchMock } = createControlledKernel({
         scheduledResponse: new Promise<Response>(() => {}),

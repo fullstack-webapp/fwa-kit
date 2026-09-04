@@ -194,29 +194,13 @@ export function createLocalEdgeDocumentRuntime(
     )
   }
 
-  const readAndPublishSnapshot = async (warning?: string) => {
-    const snapshot = await fetchKernelSnapshot()
-    if (!snapshot) {
-      publish({
-        phase: 'network-only',
-        controlled: false,
-        revalidating: false,
-        updateAvailable: false,
-        message: '页面尚未受 Local Edge 控制，继续使用 network baseline。',
-      })
-      return
-    }
-
-    publishSnapshot(snapshot, warning)
-  }
-
   // All kernel-observation reads run on one ordered chain so an older
   // fetch can never overwrite a newer observation: startup reads,
   // controller-change reads, response-driven pulls, and terminal-message
   // pulls share the same serialization.
   const enqueueSnapshotRead = (warning?: string) => {
     settlePullChain = settlePullChain.then(() =>
-      readAndPublishSnapshot(warning).catch(publishRuntimeError),
+      publishSettledSnapshot(undefined, warning).catch(publishRuntimeError),
     )
     return settlePullChain
   }
@@ -233,11 +217,18 @@ export function createLocalEdgeDocumentRuntime(
   // survives the settle. A document opened through an explicit network open
   // (?__fwa=network) stays on the network baseline by contract and drops
   // progress without pulling the kernel.
-  const publishSettledSnapshot = async (settledReleaseId?: string) => {
+  const publishSettledSnapshot = async (
+    settledReleaseId?: string,
+    warning?: string,
+  ) => {
     if (explicitNetworkOpen) {
       const { revalidationProgress: _dropped, ...rest } = state
       void _dropped
-      publish(rest)
+      publish(
+        warning === undefined
+          ? rest
+          : { ...rest, message: warning },
+      )
       return
     }
     const snapshot = await fetchKernelSnapshot()
@@ -247,7 +238,9 @@ export function createLocalEdgeDocumentRuntime(
         controlled: false,
         revalidating: false,
         updateAvailable: false,
-        message: '页面尚未受 Local Edge 控制，继续使用 network baseline。',
+        message:
+          warning ??
+          '页面尚未受 Local Edge 控制，继续使用 network baseline。',
       })
       return
     }
@@ -289,9 +282,10 @@ export function createLocalEdgeDocumentRuntime(
         updateAvailable: false,
         availableReleaseId: undefined,
         message:
-          snapshot.mode === 'disabled'
+          warning ??
+          (snapshot.mode === 'disabled'
             ? 'Local Edge 已由 release flag 禁用，当前使用 network baseline。'
-            : 'Local Edge 已激活，但还没有可用 release。',
+            : 'Local Edge 已激活，但还没有可用 release。'),
       })
       return
     }
@@ -300,7 +294,7 @@ export function createLocalEdgeDocumentRuntime(
         ...restState,
         updateAvailable: false,
         availableReleaseId: undefined,
-        message: 'Local Edge 已激活，但还没有可用 release。',
+        message: warning ?? 'Local Edge 已激活，但还没有可用 release。',
       })
       return
     }
@@ -314,15 +308,21 @@ export function createLocalEdgeDocumentRuntime(
         releaseId: activeReleaseId,
         updateAvailable: false,
         availableReleaseId: undefined,
-        message: '本地 release 已提交，navigation 可以从 Cache Storage 启动。',
+        message:
+          warning ?? '本地 release 已提交，navigation 可以从 Cache Storage 启动。',
       })
       return
     }
     if (restState.releaseId === activeReleaseId) {
+      // A successful pull proves the kernel still serves the loaded release:
+      // recover the phase for a document sitting in a transient error state.
       publishSettled({
         ...restState,
+        phase: 'ready',
+        controlled: true,
         updateAvailable: false,
         availableReleaseId: undefined,
+        ...(warning === undefined ? undefined : { message: warning }),
       })
       return
     }
@@ -334,10 +334,11 @@ export function createLocalEdgeDocumentRuntime(
       availableReleaseId: activeReleaseId,
       updateAvailable: true,
       message:
-        restState.availableReleaseId === activeReleaseId &&
+        warning ??
+        (restState.availableReleaseId === activeReleaseId &&
         restState.updateAvailable
           ? restState.message
-          : '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。',
+          : '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。'),
     })
   }
 
@@ -364,6 +365,10 @@ export function createLocalEdgeDocumentRuntime(
         await enqueueSnapshotRead(
           'Release revalidation failed; the last committed release remains active.',
         )
+      } else if (state.revalidationProgress) {
+        // A lost terminal broadcast leaves stale progress with no later
+        // event to clear it; re-sync from the kernel on the next check.
+        await enqueueSnapshotRead()
       }
       return 'failed' as const
     }
@@ -409,6 +414,11 @@ export function createLocalEdgeDocumentRuntime(
       // release the result carries.
       await enqueueSnapshotRead()
     } else if (result.status !== 'current' && revalidationVisible) {
+      await enqueueSnapshotRead()
+    } else if (result.status === 'current' && state.revalidationProgress) {
+      // 'current' proves no install was in flight at response time: stale
+      // progress (a lost terminal broadcast) re-syncs from the kernel; a
+      // cross-tab install's live progress re-publishes unchanged.
       await enqueueSnapshotRead()
     }
     return result.status === 'disabled-current'
