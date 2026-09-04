@@ -252,6 +252,31 @@ describe('release-runtime candidate install progress', () => {
     ).rejects.toThrow('release runtime is resetting')
   })
 
+  it('keeps a committed install when the committed broadcast fails', async () => {
+    client.postMessage = vi.fn((payload: { type?: string }) => {
+      if (payload.type === '__fwa:revalidation-committed') {
+        throw new Error('postMessage channel unavailable')
+      }
+      return undefined
+    })
+
+    const result = await runtime.revalidateReleaseForClient('window-1')
+
+    expect(result).toMatchObject({ status: 'installed' })
+    const postMessages = client.postMessage.mock.calls.map(
+      ([payload]) => payload as { type?: string },
+    )
+    expect(
+      postMessages.some(({ type }) => type === '__fwa:revalidation-failed'),
+    ).toBe(false)
+    const releaseId = (verifierState.descriptor as {
+      release?: { releaseId: string }
+    }).release?.releaseId
+    const releaseCache = cacheStore.get(`fwa-local-edge:local-edge-package-test:release:${releaseId}`)
+    expect(releaseCache).toBeDefined()
+    expect(releaseCache!.size).toBe(5)
+  })
+
   it('does not broadcast failed when the descriptor fetch fails before an install starts', async () => {
     verifierState.failure = new Error('descriptor fetch failed')
 

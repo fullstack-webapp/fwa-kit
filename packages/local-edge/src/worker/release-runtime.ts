@@ -294,7 +294,12 @@ async function revalidateRelease(signal: AbortSignal) {
       },
       { clearCandidate: true, localEdgeEnabled: true },
     )
-    await broadcastRevalidationCommitted(release.releaseId)
+    try {
+      await broadcastRevalidationCommitted(release.releaseId)
+    } catch {
+      // Best-effort notification only: the release is already committed, so a
+      // failed broadcast must never roll the install back.
+    }
     localEdgeEnabled = true
     return {
       status: !activeRelease
