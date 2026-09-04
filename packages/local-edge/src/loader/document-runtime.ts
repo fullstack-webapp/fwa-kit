@@ -337,22 +337,12 @@ export function createLocalEdgeDocumentRuntime(
     if (result.status === 'updated') {
       const availableReleaseId = result.release?.releaseId
       if (availableReleaseId && availableReleaseId !== state.releaseId) {
-        publish(
-          !revalidationVisible
-            ? {
-                ...state,
-                availableReleaseId,
-                updateAvailable: true,
-              }
-            : {
-                ...state,
-                phase: 'ready',
-                controlled: true,
-                availableReleaseId,
-                updateAvailable: true,
-                message:
-                  '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。',
-              },
+        // Announce from a fresh, ordered kernel observation rather than from
+        // the response payload: a commit that landed in another tab while
+        // this response was pending must not be overwritten by the older
+        // release this result carries.
+        settlePullChain = settlePullChain.then(() =>
+          publishSettledSnapshot().catch(publishRuntimeError),
         )
         return 'updated' as const
       }

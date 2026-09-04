@@ -50,6 +50,8 @@ unsubscribe?.()
 | `getState()` | Read the current document state |
 | `subscribe(listener)` | Emit immediately and on later state changes |
 | `revalidate()` | Check and install a candidate; return `current`, `updated`, `failed`, or `disabled` |
+
+An `updated` result never announces from the response payload: the loader pulls the kernel's state endpoint through the same ordered chain as terminal-message pulls, so the announcement reflects the kernel's current active release and a commit that landed in another tab while the response was pending cannot be overwritten by the older release the result carries.
 | `setUpdateCheck(config)` | Change the enabled state or interval (1–35,791 minutes) for the current document without persistence |
 | `applyUpdate()` | Reload only when a complete update is available |
 | `reset()` | Clear Local Edge-owned state and enter network mode |

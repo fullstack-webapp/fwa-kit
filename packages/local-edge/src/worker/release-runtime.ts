@@ -298,16 +298,18 @@ async function revalidateRelease(signal: AbortSignal) {
     // The install is settled: clear the progress state and drain the
     // best-effort progress sends before the terminal broadcast, so a client
     // reacting to the terminal event can never observe or re-publish a
-    // stale progress value.
+    // stale progress value. The enabled cache is refreshed before the
+    // broadcast too, so a pull triggered by the message observes the
+    // committed release as active, not as the previously disabled kernel.
     revalidationInstall = undefined
     await drainProgressSends()
+    localEdgeEnabled = true
     try {
       await broadcastRevalidationCommitted(release.releaseId)
     } catch {
       // Best-effort notification only: the release is already committed, so a
       // failed broadcast must never roll the install back.
     }
-    localEdgeEnabled = true
     return {
       status: !activeRelease
         ? 'installed'

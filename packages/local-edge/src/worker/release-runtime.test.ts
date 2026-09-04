@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AppReleaseDescriptor, VerifiedAppRelease } from '../release.ts'
+import type {
+  AppRelease,
+  AppReleaseDescriptor,
+  VerifiedAppRelease,
+} from '../release.ts'
 
 // vi.mock factories are hoisted above test definitions, so they can only close
 // over module-level bindings. Verifier and metadata behavior is configured
@@ -292,6 +296,54 @@ describe('release-runtime candidate install progress', () => {
 
     expect(snapshotAtCommit).toBeDefined()
     expect(snapshotAtCommit!.revalidation).toBeUndefined()
+  })
+
+  it('refreshes the enabled cache before the committed broadcast is observable', async () => {
+    vi.resetModules()
+    verifierState.descriptor = makeReleaseDescriptor(5)
+    const metadata = await import('./release-metadata.ts')
+    // The kernel was previously disabled: the first enabled read primes the
+    // runtime's cache with false.
+    vi.mocked(metadata.readLocalEdgeEnabled).mockResolvedValueOnce(false)
+    // The release state becomes active once the install commits, mirroring
+    // the worker's persisted state endpoint.
+    let committedActive: AppRelease | undefined
+    vi.mocked(metadata.writeReleaseState).mockImplementation(async (state) => {
+      committedActive = state.active
+    })
+    vi.mocked(metadata.readReleaseState).mockImplementation(async () =>
+      committedActive
+        ? { active: committedActive, retained: [] }
+        : { retained: [] },
+    )
+    runtime = await import('./release-runtime.ts')
+
+    const disabledSnapshot = await runtime.getLocalEdgeSnapshot()
+    expect(disabledSnapshot.mode).toBe('disabled')
+
+    let snapshotAtCommit:
+      | Awaited<ReturnType<typeof runtime.getLocalEdgeSnapshot>>
+      | undefined
+    client.postMessage = vi.fn(async (payload: { type?: string }) => {
+      if (payload.type === '__fwa:revalidation-committed') {
+        // A pull triggered by the commit message must see the committed
+        // release as active, not the previously disabled kernel.
+        snapshotAtCommit = await runtime.getLocalEdgeSnapshot()
+      }
+      return undefined
+    })
+
+    await runtime.revalidateReleaseForClient('window-1')
+
+    expect(snapshotAtCommit).toBeDefined()
+    expect(snapshotAtCommit!.mode).toBe('active')
+    expect(snapshotAtCommit!.release?.releaseId).toBe('0123456789abcdef')
+
+    // Restore the factory defaults for the tests that follow.
+    vi.mocked(metadata.writeReleaseState).mockImplementation(async () => undefined)
+    vi.mocked(metadata.readReleaseState).mockImplementation(
+      async () => ({ retained: [] }),
+    )
   })
 
   it('clears kernel progress before the failed broadcast is observable', async () => {

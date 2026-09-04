@@ -167,6 +167,7 @@ function createControlledKernel(options: {
   const replaceServiceWorker = vi.fn(async () => registration)
 
   let revalidationCallCount = 0
+  let kernelActiveReleaseId = 'release-a'
   const defaultFetch = async (input: RequestInfo | URL) => {
     const requestUrl = String(input)
     if (requestUrl === '/__fwa/state') {
@@ -179,7 +180,7 @@ function createControlledKernel(options: {
           localEdgeEnabled: snapshotMode === 'active',
           mode: snapshotMode,
           ...(snapshotMode === 'active'
-            ? { release: { releaseId: 'release-a' } }
+            ? { release: { releaseId: kernelActiveReleaseId } }
             : undefined),
           ...(snapshotRevalidation ? { revalidation: snapshotRevalidation } : undefined),
         },
@@ -200,6 +201,14 @@ function createControlledKernel(options: {
       }
       if (scheduledFailure) {
         return new Response('boom', { status: 503 })
+      }
+      // A committed install becomes the kernel's active release: the state
+      // endpoint mirrors the worker's in-memory state afterwards.
+      if (
+        revalidationReleaseId &&
+        (revalidationStatus === 'updated' || revalidationStatus === 'repaired')
+      ) {
+        kernelActiveReleaseId = revalidationReleaseId
       }
       return Response.json({
         localEdgeEnabled: true,
@@ -499,7 +508,6 @@ describe('createLocalEdgeDocumentRuntime', () => {
         revalidationStatus: 'updated',
       })
       await settle(runtime)
-      const beforeMessage = runtime.getState().message
 
       fakeScheduler.elapse(updateCheckIntervalMs)
       fakeScheduler.triggerVisible()
@@ -512,7 +520,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
         releaseId: 'release-a',
         availableReleaseId: 'release-b',
         updateAvailable: true,
-        message: beforeMessage,
+        message: '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。',
       })
       expect(reload).not.toHaveBeenCalled()
     })
@@ -523,8 +531,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
         scheduler: fakeScheduler.scheduler,
         snapshotMode: 'disabled',
         updateCheck: { intervalMinutes: 5 },
-        revalidationReleaseId: 'release-b',
-        revalidationStatus: 'updated',
+        revalidationStatus: 'disabled',
       })
       await vi.waitFor(() => {
         expect(runtime.getState().phase).toBe('network-only')
@@ -533,15 +540,11 @@ describe('createLocalEdgeDocumentRuntime', () => {
 
       fakeScheduler.elapse(updateCheckIntervalMs)
       fakeScheduler.triggerVisible()
-      await vi.waitFor(() => {
-        expect(runtime.getState().updateAvailable).toBe(true)
-      })
 
       expect(runtime.getState()).toMatchObject({
         phase: 'network-only',
         controlled: true,
-        availableReleaseId: 'release-b',
-        updateAvailable: true,
+        updateAvailable: false,
         message: beforeMessage,
       })
     })
@@ -1266,6 +1269,72 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('does not let a stale revalidate response overwrite a newer cross-tab commit', async () => {
+      let stateCall = 0
+      let revalidateCall = 0
+      let resolveRevalidate: ((response: Response) => void) | undefined
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const releaseId = stateCall === 1 ? 'release-a' : 'release-c'
+            return Response.json(
+              { localEdgeEnabled: true, mode: 'active', release: { releaseId } },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return Response.json({
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              })
+            }
+            // This document's revalidation response stays pending while the
+            // other tab commits.
+            return new Promise<Response>((resolve) => {
+              resolveRevalidate = resolve
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      void runtime.revalidate()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidating).toBe(true)
+      })
+
+      // Another tab commits release-c while this document's response is pending.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-c' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().availableReleaseId).toBe('release-c')
+      })
+
+      // The stale response claims release-b: its announcement must not
+      // regress the newer cross-tab observation.
+      resolveRevalidate?.(
+        Response.json({
+          localEdgeEnabled: true,
+          release: { releaseId: 'release-b' },
+          status: 'updated',
+        }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 30))
+
+      expect(runtime.getState().availableReleaseId).toBe('release-c')
+      expect(runtime.getState().revalidating).toBe(false)
+    })
+
     it('keeps an announced available update when the committed pull sees the same active release', async () => {
       let announcedActive = 'release-a'
       const { runtime, serviceWorker, fetchMock } = createControlledKernel({
@@ -1284,6 +1353,8 @@ describe('createLocalEdgeDocumentRuntime', () => {
             )
           }
           if (requestUrl === '/__fwa/revalidate') {
+            // The committed install becomes the kernel's active release.
+            announcedActive = 'release-b'
             return Response.json({
               localEdgeEnabled: true,
               release: { releaseId: 'release-b' },
@@ -1294,19 +1365,21 @@ describe('createLocalEdgeDocumentRuntime', () => {
         },
       })
       await settle(runtime)
-      // The document's own visible revalidate announces the update.
+      // The document's own visible revalidate announces the update through a
+      // fresh kernel pull.
       const outcome = runtime.revalidate()
       await outcome
-      expect(runtime.getState()).toMatchObject({
-        phase: 'ready',
-        releaseId: 'release-a',
-        availableReleaseId: 'release-b',
-        updateAvailable: true,
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'ready',
+          releaseId: 'release-a',
+          availableReleaseId: 'release-b',
+          updateAvailable: true,
+        })
       })
 
       // The kernel commit broadcast pulls a snapshot whose active release is the
       // one it just committed (release-b). The loader keeps the announcement.
-      announcedActive = 'release-b'
       serviceWorker.dispatchEvent(
         kernelMessage(
           { type: fwaRevalidationCommittedMessageType },
@@ -1318,7 +1391,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
           fetchMock.mock.calls.filter(
             ([input]) => String(input) === '/__fwa/state',
           ),
-        ).toHaveLength(2)
+        ).toHaveLength(3)
       })
 
       expect(runtime.getState()).toMatchObject({
