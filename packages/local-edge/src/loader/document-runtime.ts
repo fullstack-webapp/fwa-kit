@@ -93,6 +93,11 @@ export function createLocalEdgeDocumentRuntime(
   // progress for any release marked later than that.
   let kernelEventSeq = 0
   const settledAtSeq = new Map<string, number>()
+  // Progress published by a broadcast after an unscoped clear-read began is
+  // newer than that read's kernel view: the unscoped pull drops only the
+  // suspected-stale value it was asked to clear, never progress that
+  // arrived while its fetch was in flight.
+  let progressEventSeq = 0
   let started = false
   let stopped = false
   let scheduledChecksStarted = false
@@ -281,6 +286,7 @@ export function createLocalEdgeDocumentRuntime(
       return
     }
     const startedAtSeq = kernelEventSeq
+    const progressSeqAtStart = progressEventSeq
     const snapshot = await fetchKernelSnapshot()
     if (!snapshot) {
       publish({
@@ -316,11 +322,13 @@ export function createLocalEdgeDocumentRuntime(
         : currentProgress
       : baselineDropped
         ? currentProgress
-        : currentProgress &&
-            settledReleaseId &&
-            currentProgress.releaseId !== settledReleaseId
+        : currentProgress && progressEventSeq !== progressSeqAtStart
           ? currentProgress
-          : undefined
+          : currentProgress &&
+              settledReleaseId &&
+              currentProgress.releaseId !== settledReleaseId
+            ? currentProgress
+            : undefined
     const { revalidationProgress: _merged, ...restState } = state
     void _merged
     const publishSettled = (value: LocalEdgeClientState) => {
@@ -709,6 +717,7 @@ export function createLocalEdgeDocumentRuntime(
         ...state,
         revalidationProgress: progress,
       })
+      progressEventSeq += 1
       return
     }
     if (

@@ -1461,6 +1461,79 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('keeps progress that lands while an unscoped clear-read is in flight', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let stateCall = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            if (stateCall >= 2) {
+              // A fresh broadcast lands while the clear-read's fetch is in
+              // flight; the kernel was idle when the read was served.
+              serviceWorker.dispatchEvent(
+                kernelMessage(
+                  {
+                    type: fwaRevalidationProgressMessageType,
+                    releaseId: 'release-b',
+                    completedAssets: 7,
+                    totalAssets: 10,
+                  },
+                  controllerSource(serviceWorker),
+                ),
+              )
+            }
+            await new Promise((resolve) => setTimeout(resolve, 30))
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-a' },
+              status: 'current',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(stateCall).toBeGreaterThanOrEqual(2)
+      })
+      // The fresh mid-read broadcast survives the unscoped pull; the
+      // suspected-stale value it replaced does not come back.
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        releaseId: 'release-b',
+        completedAssets: 7,
+      })
+    })
+
     it('does not let the startup snapshot regress a newer progress message', async () => {
       let stateCall = 0
       const { runtime, serviceWorker } = createControlledKernel({
