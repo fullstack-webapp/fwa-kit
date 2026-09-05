@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   fwaKernelProtocolHeaderName,
   fwaKernelProtocolVersion,
+  fwaMinimumKernelProtocolVersion,
+  fwaRevalidationCommittedMessageType,
+  fwaRevalidationFailedMessageType,
+  fwaRevalidationProgressMessageType,
   maxUpdateCheckIntervalMinutes,
 } from '../config-contract.ts'
 import {
@@ -18,11 +22,54 @@ const documentConfig = {
   controlPrefix: '/__fwa',
 }
 
-function fwaKernelStateHeaders() {
+const testKernelInstanceId = '00000000-0000-4000-8000-000000000001'
+
+function fwaKernelStateHeaders(
+  protocolVersion = fwaMinimumKernelProtocolVersion,
+) {
   return {
     'X-FWA-Kernel': workerPath,
-    [fwaKernelProtocolHeaderName]: String(fwaKernelProtocolVersion),
+    [fwaKernelProtocolHeaderName]: String(protocolVersion),
   }
+}
+
+function orderedKernelSnapshot(
+  snapshot: Record<string, unknown>,
+  observationRevision: number,
+  revalidation?: {
+    attemptId: number
+    releaseId: string
+    completedAssets: number
+    totalAssets: number
+  },
+) {
+  const identity = { kernelInstanceId: testKernelInstanceId, observationRevision }
+  return Response.json(
+    {
+      ...snapshot,
+      ...identity,
+      ...(revalidation
+        ? { revalidation: { ...revalidation, ...identity } }
+        : undefined),
+    },
+    { headers: fwaKernelStateHeaders(fwaKernelProtocolVersion) },
+  )
+}
+
+function orderedKernelResult(
+  result: Record<string, unknown>,
+  observationRevision: number,
+  attemptId?: number,
+) {
+  return Response.json(
+    {
+      ...result,
+      kernelInstanceId: testKernelInstanceId,
+      observationRevision,
+      ...(attemptId === undefined ? undefined : { attemptId }),
+    },
+    { headers: fwaKernelStateHeaders(fwaKernelProtocolVersion) },
+  )
 }
 
 interface FakeScheduler {
@@ -114,10 +161,17 @@ function createControlledKernel(options: {
   scheduler?: LocalEdgeDocumentScheduler
   protocolVersion?: string | null
   snapshotMode?: 'active' | 'disabled' | 'network-only'
+  snapshotRevalidation?: {
+    releaseId: string
+    completedAssets: number
+    totalAssets: number
+    attemptId?: number
+  }
   updateCheck?: {
     enabled?: boolean
     intervalMinutes?: number
   }
+  documentHref?: string
   revalidationStatus?: string
   revalidationReleaseId?: string
   scheduledFailure?: boolean
@@ -128,7 +182,9 @@ function createControlledKernel(options: {
     scheduler,
     protocolVersion = String(fwaKernelProtocolVersion),
     snapshotMode = 'active',
+    snapshotRevalidation,
     updateCheck,
+    documentHref = 'https://app.example/',
     revalidationStatus = 'current',
     revalidationReleaseId,
     scheduledFailure = false,
@@ -156,32 +212,94 @@ function createControlledKernel(options: {
   const replaceServiceWorker = vi.fn(async () => registration)
 
   let revalidationCallCount = 0
+  let observationRevision = snapshotRevalidation ? 1 : 0
+  let kernelActiveReleaseId = 'release-a'
+  let liveKernelProgress = snapshotRevalidation
+    ? { attemptId: snapshotRevalidation.attemptId ?? 1, ...snapshotRevalidation }
+    : undefined
+  const orderedProtocol =
+    protocolVersion !== null &&
+    Number(protocolVersion) >= fwaKernelProtocolVersion
+  const responseHeaders = () => {
+    const headers = new Headers({ 'X-FWA-Kernel': workerPath })
+    if (protocolVersion !== null) {
+      headers.set(fwaKernelProtocolHeaderName, protocolVersion)
+    }
+    return headers
+  }
+  const observationIdentity = () => ({
+    kernelInstanceId: testKernelInstanceId,
+    observationRevision,
+  })
+  const dispatchKernelEvent = serviceWorker.dispatchEvent.bind(serviceWorker)
+  serviceWorker.dispatchEvent = ((event: Event) => {
+    if (event instanceof MessageEvent && typeof event.data === 'object' && event.data) {
+      const payload = event.data as Record<string, unknown>
+      if (
+        payload.kernelInstanceId === testKernelInstanceId &&
+        typeof payload.observationRevision === 'number'
+      ) {
+        observationRevision = Math.max(
+          observationRevision,
+          payload.observationRevision,
+        )
+      }
+      if (payload.type === fwaRevalidationProgressMessageType) {
+        liveKernelProgress = {
+          attemptId: payload.attemptId as number,
+          releaseId: payload.releaseId as string,
+          completedAssets: payload.completedAssets as number,
+          totalAssets: payload.totalAssets as number,
+        }
+      } else if (
+        payload.type === fwaRevalidationCommittedMessageType ||
+        payload.type === fwaRevalidationFailedMessageType
+      ) {
+        liveKernelProgress = undefined
+        if (
+          payload.type === fwaRevalidationCommittedMessageType &&
+          typeof payload.releaseId === 'string'
+        ) {
+          kernelActiveReleaseId = payload.releaseId
+        }
+      }
+    }
+    return dispatchKernelEvent(event)
+  }) as typeof serviceWorker.dispatchEvent
   const defaultFetch = async (input: RequestInfo | URL) => {
     const requestUrl = String(input)
     if (requestUrl === '/__fwa/state') {
-      const headers = new Headers({ 'X-FWA-Kernel': workerPath })
-      if (protocolVersion !== null) {
-        headers.set(fwaKernelProtocolHeaderName, protocolVersion)
-      }
       return Response.json(
         {
           localEdgeEnabled: snapshotMode === 'active',
           mode: snapshotMode,
+          ...(orderedProtocol ? observationIdentity() : undefined),
           ...(snapshotMode === 'active'
-            ? { release: { releaseId: 'release-a' } }
+            ? { release: { releaseId: kernelActiveReleaseId } }
+            : undefined),
+          ...(liveKernelProgress
+            ? {
+                revalidation: orderedProtocol
+                  ? {
+                      ...observationIdentity(),
+                      ...liveKernelProgress,
+                    }
+                  : liveKernelProgress,
+              }
             : undefined),
         },
-        { headers },
+        { headers: responseHeaders() },
       )
     }
     if (requestUrl === '/__fwa/revalidate') {
       revalidationCallCount += 1
       if (revalidationCallCount === 1) {
         return Response.json({
+          ...(orderedProtocol ? observationIdentity() : undefined),
           localEdgeEnabled: true,
           release: { releaseId: 'release-a' },
           status: 'current',
-        })
+        }, { headers: responseHeaders() })
       }
       if (scheduledResponse) {
         return scheduledResponse
@@ -189,13 +307,30 @@ function createControlledKernel(options: {
       if (scheduledFailure) {
         return new Response('boom', { status: 503 })
       }
+      // A committed install becomes the kernel's active release: the state
+      // endpoint mirrors the worker's in-memory state afterwards.
+      if (
+        revalidationReleaseId &&
+        (revalidationStatus === 'updated' || revalidationStatus === 'repaired')
+      ) {
+        kernelActiveReleaseId = revalidationReleaseId
+        observationRevision += 1
+      }
+      const needsAttempt =
+        revalidationStatus === 'updated' ||
+        revalidationStatus === 'repaired' ||
+        revalidationStatus === 'installed'
       return Response.json({
+        ...(orderedProtocol ? observationIdentity() : undefined),
+        ...(orderedProtocol && needsAttempt
+          ? { attemptId: observationRevision }
+          : undefined),
         localEdgeEnabled: true,
         release: revalidationReleaseId
           ? { releaseId: revalidationReleaseId }
           : { releaseId: 'release-a' },
         status: revalidationStatus,
-      })
+      }, { headers: responseHeaders() })
     }
     throw new Error(`unexpected fetch: ${requestUrl}`)
   }
@@ -204,7 +339,7 @@ function createControlledKernel(options: {
   vi.stubGlobal('navigator', { serviceWorker })
   vi.stubGlobal('window', {
     location: {
-      href: 'https://app.example/',
+      href: documentHref,
       origin: 'https://app.example',
       reload,
       replace: vi.fn(),
@@ -237,6 +372,11 @@ function createControlledKernel(options: {
     reload,
     replaceServiceWorker,
     runtime,
+    serviceWorker,
+    settleKernelProgress() {
+      liveKernelProgress = undefined
+      observationRevision += 1
+    },
   }
 }
 
@@ -382,10 +522,31 @@ describe('createLocalEdgeDocumentRuntime', () => {
     expect(reload).not.toHaveBeenCalled()
   })
 
+  it('keeps a valid level-1 controller without ordered progress capability', async () => {
+    const { runtime, replaceServiceWorker, reload } = createControlledKernel({
+      protocolVersion: String(fwaMinimumKernelProtocolVersion),
+      snapshotRevalidation: {
+        releaseId: 'release-b',
+        completedAssets: 2,
+        totalAssets: 9,
+      },
+    })
+    await waitForPhase(runtime, 'ready')
+
+    expect(runtime.getState()).toMatchObject({
+      controlled: true,
+      phase: 'ready',
+      releaseId: 'release-a',
+    })
+    expect(runtime.getState().revalidationProgress).toBeUndefined()
+    expect(replaceServiceWorker).not.toHaveBeenCalled()
+    expect(reload).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['missing', null],
     ['invalid', 'not-a-version'],
-    ['older', String(fwaKernelProtocolVersion - 1)],
+    ['older', String(fwaMinimumKernelProtocolVersion - 1)],
   ])(
     'routes a controlled worker with a %s protocol identity through one guarded takeover',
     async (_case, protocolVersion) => {
@@ -486,7 +647,6 @@ describe('createLocalEdgeDocumentRuntime', () => {
         revalidationStatus: 'updated',
       })
       await settle(runtime)
-      const beforeMessage = runtime.getState().message
 
       fakeScheduler.elapse(updateCheckIntervalMs)
       fakeScheduler.triggerVisible()
@@ -499,7 +659,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
         releaseId: 'release-a',
         availableReleaseId: 'release-b',
         updateAvailable: true,
-        message: beforeMessage,
+        message: '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。',
       })
       expect(reload).not.toHaveBeenCalled()
     })
@@ -510,8 +670,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
         scheduler: fakeScheduler.scheduler,
         snapshotMode: 'disabled',
         updateCheck: { intervalMinutes: 5 },
-        revalidationReleaseId: 'release-b',
-        revalidationStatus: 'updated',
+        revalidationStatus: 'disabled',
       })
       await vi.waitFor(() => {
         expect(runtime.getState().phase).toBe('network-only')
@@ -520,15 +679,11 @@ describe('createLocalEdgeDocumentRuntime', () => {
 
       fakeScheduler.elapse(updateCheckIntervalMs)
       fakeScheduler.triggerVisible()
-      await vi.waitFor(() => {
-        expect(runtime.getState().updateAvailable).toBe(true)
-      })
 
       expect(runtime.getState()).toMatchObject({
         phase: 'network-only',
         controlled: true,
-        availableReleaseId: 'release-b',
-        updateAvailable: true,
+        updateAvailable: false,
         message: beforeMessage,
       })
     })
@@ -929,6 +1084,2025 @@ describe('createLocalEdgeDocumentRuntime', () => {
           ),
         ).toHaveLength(2)
       })
+    })
+  })
+
+  describe('kernel revalidation progress messages', () => {
+    let messageRevision = 20
+    const controllerSource = (serviceWorker: { controller: ServiceWorker | null }) =>
+      serviceWorker.controller
+
+    function kernelMessage(
+      data: unknown,
+      source: unknown,
+    ): MessageEvent {
+      const record =
+        typeof data === 'object' && data !== null
+          ? (data as Record<string, unknown>)
+          : undefined
+      const isObservationMessage =
+        record?.type === fwaRevalidationProgressMessageType ||
+        record?.type === fwaRevalidationCommittedMessageType ||
+        record?.type === fwaRevalidationFailedMessageType
+      const enriched = isObservationMessage
+        ? {
+            kernelInstanceId: testKernelInstanceId,
+            observationRevision: (messageRevision += 1),
+            attemptId: 10,
+            releaseId: 'release-b',
+            ...record,
+          }
+        : data
+      const event = new MessageEvent('message', { data: enriched })
+      Object.defineProperty(event, 'source', {
+        configurable: true,
+        value: source,
+      })
+      return event
+    }
+
+    it('preserves a failure warning when its snapshot pull is coalesced', async () => {
+      let stateCallCount = 0
+      let revalidationCallCount = 0
+      let delayNextState = false
+      let resolveDelayedState!: (response: Response) => void
+      const delayedState = new Promise<Response>((resolve) => {
+        resolveDelayedState = resolve
+      })
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            if (delayNextState) {
+              delayNextState = false
+              return delayedState
+            }
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              stateCallCount === 1 ? 0 : 22,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidationCallCount += 1
+            if (revalidationCallCount === 1) {
+              return orderedKernelResult(
+                {
+                  localEdgeEnabled: true,
+                  release: { releaseId: 'release-a' },
+                  status: 'current',
+                },
+                0,
+              )
+            }
+            return new Response('boom', { status: 503 })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      delayNextState = true
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => expect(stateCallCount).toBe(2))
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      const explicitOutcome = runtime.revalidate()
+      resolveDelayedState(
+        orderedKernelSnapshot(
+          {
+            localEdgeEnabled: true,
+            mode: 'active',
+            release: { releaseId: 'release-a' },
+          },
+          21,
+        ),
+      )
+
+      await expect(explicitOutcome).resolves.toBe('failed')
+      expect(runtime.getState().message).toBe(
+        'Release revalidation failed; the last committed release remains active.',
+      )
+    })
+
+    it('continues startup when two snapshots are overtaken by progress', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let stateCallCount = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            if (stateCallCount <= 2) {
+              serviceWorker.dispatchEvent(
+                kernelMessage(
+                  {
+                    type: fwaRevalidationProgressMessageType,
+                    releaseId: 'release-b',
+                    completedAssets: stateCallCount,
+                    totalAssets: 4,
+                  },
+                  controllerSource(serviceWorker),
+                ),
+              )
+              return orderedKernelSnapshot(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                0,
+              )
+            }
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              100,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              },
+              99,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+
+      await settle(runtime)
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+      })
+      expect(fakeScheduler.intervalCount()).toBe(1)
+    })
+
+    it('keeps scheduled recovery active after a startup snapshot failure', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let stateCallCount = 0
+      const { runtime } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            if (stateCallCount === 1) {
+              return new Response('temporarily unavailable', {
+                status: 503,
+                headers: fwaKernelStateHeaders(fwaKernelProtocolVersion),
+              })
+            }
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              1,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              },
+              1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await vi.waitFor(() =>
+        expect(runtime.getState()).toMatchObject({ phase: 'error' }),
+      )
+      expect(fakeScheduler.intervalCount()).toBe(1)
+
+      fakeScheduler.advanceTime(5 * 60 * 1_000)
+
+      await vi.waitFor(() =>
+        expect(runtime.getState()).toMatchObject({
+          phase: 'ready',
+          releaseId: 'release-a',
+        }),
+      )
+    })
+
+    it('keeps a silent snapshot failure out of the public error state', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let failStateRead = false
+      let failedStateCalls = 0
+      const { runtime } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            if (failStateRead) {
+              failedStateCalls += 1
+              return new Response('temporarily unavailable', {
+                status: 503,
+                headers: fwaKernelStateHeaders(fwaKernelProtocolVersion),
+              })
+            }
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              1,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              },
+              1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      const stateBeforeCheck = runtime.getState()
+      failStateRead = true
+
+      fakeScheduler.advanceTime(5 * 60 * 1_000)
+      await vi.waitFor(() => expect(failedStateCalls).toBe(1))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(runtime.getState()).toEqual(stateBeforeCheck)
+    })
+
+    it('keeps silent failed-result recovery out of the public error state', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let failKernelRequests = false
+      let failedStateCalls = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            if (failKernelRequests) {
+              failedStateCalls += 1
+              return new Response('temporarily unavailable', {
+                status: 503,
+                headers: fwaKernelStateHeaders(fwaKernelProtocolVersion),
+              })
+            }
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              1,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return failKernelRequests
+              ? new Response('temporarily unavailable', { status: 503 })
+              : orderedKernelResult(
+                  {
+                    localEdgeEnabled: true,
+                    release: { releaseId: 'release-a' },
+                    status: 'current',
+                  },
+                  1,
+                )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            observationRevision: 2,
+            attemptId: 2,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      const stateBeforeCheck = runtime.getState()
+      failKernelRequests = true
+
+      fakeScheduler.advanceTime(5 * 60 * 1_000)
+      await vi.waitFor(() => expect(failedStateCalls).toBe(1))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(runtime.getState()).toEqual(stateBeforeCheck)
+    })
+
+    it('surfaces failed-result recovery when the same check is explicit', async () => {
+      let failKernelRequests = false
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            return failKernelRequests
+              ? new Response('temporarily unavailable', {
+                  status: 503,
+                  headers: fwaKernelStateHeaders(fwaKernelProtocolVersion),
+                })
+              : orderedKernelSnapshot(
+                  {
+                    localEdgeEnabled: true,
+                    mode: 'active',
+                    release: { releaseId: 'release-a' },
+                  },
+                  1,
+                )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return failKernelRequests
+              ? new Response('temporarily unavailable', { status: 503 })
+              : orderedKernelResult(
+                  {
+                    localEdgeEnabled: true,
+                    release: { releaseId: 'release-a' },
+                    status: 'current',
+                  },
+                  1,
+                )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            observationRevision: 2,
+            attemptId: 2,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      failKernelRequests = true
+
+      await expect(runtime.revalidate()).resolves.toBe('failed')
+      expect(runtime.getState()).toMatchObject({
+        phase: 'error',
+        revalidating: false,
+      })
+    })
+
+    it('publishes revalidationProgress from the kernel snapshot when a pull sees an install', async () => {
+      const { runtime } = createControlledKernel({
+        snapshotRevalidation: {
+          releaseId: 'release-b',
+          completedAssets: 2,
+          totalAssets: 9,
+        },
+      })
+      await settle(runtime)
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        revalidationProgress: {
+          releaseId: 'release-b',
+          completedAssets: 2,
+          totalAssets: 9,
+        },
+      })
+    })
+
+    it('drops a stale revalidationProgress after a committed snapshot pull', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
+    it('drops progress that predates another release terminal event', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      // release-b settled but this tab missed its terminal message, leaving
+      // only a stale progress value behind.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      // release-c then fails before completing any asset. Its terminal pull
+      // observes an idle kernel; release-b's pre-fetch progress is stale,
+      // not evidence of another live install.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationFailedMessageType, releaseId: 'release-c' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
+    it('reports failure when the announcement pull fails', async () => {
+      let stateCall = 0
+      let revalidateCall = 0
+      const { runtime } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            if (stateCall === 1) {
+              return Response.json(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                { headers: fwaKernelStateHeaders() },
+              )
+            }
+            // The ordered announcement pull cannot reach the kernel.
+            throw new Error('kernel state unreachable')
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return Response.json({
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              })
+            }
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-b' },
+              status: 'updated',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      const result = await runtime.revalidate()
+
+      expect(result).toBe('failed')
+      expect(runtime.getState()).toMatchObject({ phase: 'error' })
+    })
+
+    it('resolves revalidate with the announcement already visible', async () => {
+      const { runtime } = createControlledKernel({
+        revalidationReleaseId: 'release-b',
+        revalidationStatus: 'updated',
+      })
+      await settle(runtime)
+
+      await runtime.revalidate()
+
+      // No waitFor: the public promise resolves only after the ordered
+      // announcement pull has published.
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+        revalidating: false,
+      })
+    })
+
+    it('recovers a missed commit from an ordered current result', async () => {
+      let stateCallCount = 0
+      let activeReleaseId = 'release-a'
+      const { runtime } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: activeReleaseId },
+              },
+              activeReleaseId === 'release-a' ? 0 : 1,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: activeReleaseId },
+                status: 'current',
+              },
+              activeReleaseId === 'release-a' ? 0 : 1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      const startupStateCalls = stateCallCount
+      activeReleaseId = 'release-c'
+
+      await expect(runtime.revalidate()).resolves.toBe('current')
+
+      expect(runtime.getState()).toMatchObject({
+        releaseId: 'release-a',
+        availableReleaseId: 'release-c',
+        updateAvailable: true,
+      })
+      expect(stateCallCount).toBe(startupStateCalls + 1)
+    })
+
+    it('re-syncs state after a silent ordered disabled-current result', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let mode: 'active' | 'disabled' = 'active'
+      const { runtime } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: mode === 'active',
+                mode,
+                ...(mode === 'active'
+                  ? { release: { releaseId: 'release-a' } }
+                  : undefined),
+              },
+              mode === 'active' ? 0 : 1,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: mode === 'active',
+                ...(mode === 'active'
+                  ? { release: { releaseId: 'release-a' } }
+                  : undefined),
+                status: mode === 'active' ? 'current' : 'disabled-current',
+              },
+              mode === 'active' ? 0 : 1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      mode = 'disabled'
+      fakeScheduler.advanceTime(5 * 60 * 1_000)
+
+      await vi.waitFor(() =>
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          updateAvailable: false,
+          availableReleaseId: undefined,
+        }),
+      )
+      expect(runtime.getState().releaseId).toBeUndefined()
+    })
+
+    it('clears a stale announcement after a silent same-release update', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let activeReleaseId = 'release-c'
+      let observationRevision = 0
+      let revalidationStatus: 'current' | 'updated' = 'current'
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: activeReleaseId },
+              },
+              observationRevision,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: activeReleaseId },
+                status: revalidationStatus,
+              },
+              observationRevision,
+              revalidationStatus === 'updated' ? observationRevision : undefined,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      activeReleaseId = 'release-d'
+      observationRevision = 1
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationCommittedMessageType,
+            observationRevision,
+            attemptId: observationRevision,
+            releaseId: activeReleaseId,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() =>
+        expect(runtime.getState()).toMatchObject({
+          releaseId: 'release-c',
+          availableReleaseId: 'release-d',
+          updateAvailable: true,
+        }),
+      )
+
+      activeReleaseId = 'release-c'
+      observationRevision = 2
+      revalidationStatus = 'updated'
+      fakeScheduler.advanceTime(5 * 60 * 1_000)
+
+      await vi.waitFor(() =>
+        expect(runtime.getState()).toMatchObject({
+          releaseId: 'release-c',
+          availableReleaseId: undefined,
+          updateAvailable: false,
+        }),
+      )
+    })
+
+    it('does not let a slow startup read overwrite a newer commit observation', async () => {
+      let stateCall = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const headers = new Headers(fwaKernelStateHeaders())
+            if (stateCall === 1) {
+              // A commit lands while the startup read is still in flight.
+              serviceWorker.dispatchEvent(
+                kernelMessage(
+                  {
+                    type: fwaRevalidationCommittedMessageType,
+                    releaseId: 'release-b',
+                  },
+                  controllerSource(serviceWorker),
+                ),
+              )
+              await new Promise((resolve) => setTimeout(resolve, 30))
+              // The startup read resolves with the pre-commit kernel state.
+              return Response.json(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                { headers },
+              )
+            }
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-b' },
+              },
+              { headers },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-a' },
+              status: 'current',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      // The terminal pull runs after the startup read on the ordered chain,
+      // so its newer observation survives the older startup snapshot.
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+      })
+    })
+
+    it('does not let a delayed silent install response overwrite a newer cross-tab commit', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let stateCall = 0
+      let revalidateCall = 0
+      let resolveRevalidate: ((response: Response) => void) | undefined
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const headers = new Headers(fwaKernelStateHeaders())
+            if (stateCall === 1) {
+              return Response.json(
+                { localEdgeEnabled: true, mode: 'network-only' },
+                { headers },
+              )
+            }
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-c' },
+              },
+              { headers },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return Response.json({
+                localEdgeEnabled: true,
+                status: 'current',
+              })
+            }
+            // The background tab's silent first-install response stays
+            // pending while the other tab commits.
+            return new Promise<Response>((resolve) => {
+              resolveRevalidate = resolve
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await vi.waitFor(() => {
+        expect(runtime.getState().phase).toBe('network-only')
+      })
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(resolveRevalidate).toBeDefined()
+      })
+
+      // Another tab commits release-c while this document's response is
+      // still pending; the terminal pull claims release-c for this tab.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-c' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().releaseId).toBe('release-c')
+      })
+
+      // The delayed response claims release-b: its first-install claim must
+      // derive from a fresh ordered snapshot read, not overwrite release-c.
+      resolveRevalidate?.(
+        Response.json({
+          localEdgeEnabled: true,
+          release: { releaseId: 'release-b' },
+          status: 'installed',
+        }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 30))
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-c',
+        updateAvailable: false,
+      })
+    })
+
+    it('isolates the nested progress object from consumer mutations', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      const exposed = runtime.getState()
+      ;(exposed.revalidationProgress as { completedAssets: number }).completedAssets = 99
+
+      // The runtime's own baseline is unaffected by the consumer's mutation,
+      // so the monotonic guard still accepts fresh counts.
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        completedAssets: 3,
+      })
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 4,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        completedAssets: 4,
+      })
+    })
+
+    it('does not relabel the document when a manual revalidate fails with an update pending', async () => {
+      let stateCall = 0
+      let revalidateCall = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const releaseId = stateCall === 1 ? 'release-a' : 'release-b'
+            return Response.json(
+              { localEdgeEnabled: true, mode: 'active', release: { releaseId } },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return Response.json({
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              })
+            }
+            return new Response('boom', { status: 503 })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          releaseId: 'release-a',
+          availableReleaseId: 'release-b',
+          updateAvailable: true,
+        })
+      })
+
+      // A manual update check fails while the kernel is active on release-b:
+      // the failure pull must keep the loaded release and the announcement.
+      await runtime.revalidate()
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+        message:
+          'Release revalidation failed; the last committed release remains active.',
+      })
+    })
+
+    it('re-syncs stale progress from the kernel when a silent check fails', async () => {
+      const fakeScheduler = createFakeScheduler()
+      const { runtime, serviceWorker, settleKernelProgress } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        scheduledFailure: true,
+      })
+      await settle(runtime)
+
+      // A terminal broadcast was lost: progress stays behind with no later
+      // event to clear it.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+      // The attempt settled in the kernel, but this document missed terminal.
+      settleKernelProgress()
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
+    it('re-syncs stale progress from the kernel after a current check', async () => {
+      const fakeScheduler = createFakeScheduler()
+      const { runtime, serviceWorker, settleKernelProgress } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+      })
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+      settleKernelProgress()
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
+    it('clears progress after a silent repair settles', async () => {
+      const fakeScheduler = createFakeScheduler()
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        revalidationStatus: 'repaired',
+        revalidationReleaseId: 'release-a',
+      })
+      await settle(runtime)
+
+      // The repair's best-effort terminal broadcast is lost: only its
+      // progress arrived.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-a',
+            completedAssets: 6,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      fakeScheduler.elapse(updateCheckIntervalMs)
+      fakeScheduler.triggerVisible()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+    })
+
+    it('does not let the startup snapshot resurrect progress settled mid-read', async () => {
+      let stateCall = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            if (stateCall === 1) {
+              // The release settles while the startup read is in flight;
+              // the fetch still captured the settled attempt's counts.
+              serviceWorker.dispatchEvent(
+                kernelMessage(
+                  {
+                    type: fwaRevalidationCommittedMessageType,
+                    releaseId: 'release-b',
+                  },
+                  controllerSource(serviceWorker),
+                ),
+              )
+            }
+            await new Promise((resolve) => setTimeout(resolve, 30))
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+                revalidation: {
+                  releaseId: 'release-b',
+                  completedAssets: 5,
+                  totalAssets: 10,
+                },
+              },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-a' },
+              status: 'current',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+    })
+
+    it('keeps a document-owned revalidate flag when a settle pull lands mid-revalidate', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({
+        scheduledResponse: new Promise<Response>(() => {}),
+      })
+      await settle(runtime)
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidating).toBe(false)
+      })
+
+      void runtime.revalidate()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidating).toBe(true)
+      })
+
+      const stateFetchCallsBefore = fetchMock.mock.calls.filter(
+        (call) => String(call[0]) === '/__fwa/state',
+      ).length
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-a' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter((call) => String(call[0]) === '/__fwa/state')
+            .length,
+        ).toBeGreaterThan(stateFetchCallsBefore)
+      })
+
+      expect(runtime.getState().updateAvailable).toBe(false)
+      expect(runtime.getState().revalidating).toBe(true)
+    })
+
+    it('ignores an out-of-order progress broadcast that would regress the count', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 5,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        releaseId: 'release-b',
+        completedAssets: 5,
+        totalAssets: 10,
+      })
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 2,
+            totalAssets: 10,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toMatchObject({
+        releaseId: 'release-b',
+        completedAssets: 5,
+        totalAssets: 10,
+      })
+    })
+
+    it('keeps an explicitly network-opened document on the network baseline when a commit settles', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({
+        documentHref: 'https://app.example/?__fwa=network',
+      })
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          controlled: true,
+        })
+      })
+      expect(runtime.getState().releaseId).toBeUndefined()
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 4,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState()).toMatchObject({
+        phase: 'network-only',
+      })
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          controlled: true,
+          revalidating: false,
+          updateAvailable: false,
+          message: '当前页面经显式 network open 进入，不重新注册 Local Edge。',
+        })
+      })
+      expect(runtime.getState().releaseId).toBeUndefined()
+      expect(runtime.getState().availableReleaseId).toBeUndefined()
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+    })
+
+    it('still pulls for an ordinary network-only document that is not an explicit network open', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({
+        snapshotMode: 'disabled',
+      })
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          controlled: true,
+        })
+      })
+
+      const fetchCallsBefore = fetchMock.mock.calls.length
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(fetchMock.mock.calls.length).toBeGreaterThan(fetchCallsBefore)
+      })
+      expect(runtime.getState()).toMatchObject({
+        phase: 'network-only',
+        controlled: true,
+      })
+    })
+
+    it('drops progress and re-pulls the snapshot after a failed install message', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      await settle(runtime)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 2,
+            totalAssets: 6,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      expect(runtime.getState().revalidationProgress).toBeDefined()
+
+      const fetchCallsBefore = fetchMock.mock.calls.length
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationFailedMessageType, releaseId: 'release-b' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidationProgress).toBeUndefined()
+      })
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(fetchCallsBefore)
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        revalidating: false,
+        updateAvailable: false,
+      })
+    })
+
+    it('does not let a stale revalidate response overwrite a newer cross-tab commit', async () => {
+      let stateCall = 0
+      let revalidateCall = 0
+      let resolveRevalidate: ((response: Response) => void) | undefined
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const releaseId = stateCall === 1 ? 'release-a' : 'release-c'
+            return Response.json(
+              { localEdgeEnabled: true, mode: 'active', release: { releaseId } },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return Response.json({
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              })
+            }
+            // This document's revalidation response stays pending while the
+            // other tab commits.
+            return new Promise<Response>((resolve) => {
+              resolveRevalidate = resolve
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      void runtime.revalidate()
+      await vi.waitFor(() => {
+        expect(runtime.getState().revalidating).toBe(true)
+      })
+
+      // Another tab commits release-c while this document's response is pending.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType, releaseId: 'release-c' },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(runtime.getState().availableReleaseId).toBe('release-c')
+      })
+
+      // The stale response claims release-b: its announcement must not
+      // regress the newer cross-tab observation.
+      resolveRevalidate?.(
+        Response.json({
+          localEdgeEnabled: true,
+          release: { releaseId: 'release-b' },
+          status: 'updated',
+        }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 30))
+
+      expect(runtime.getState().availableReleaseId).toBe('release-c')
+      expect(runtime.getState().revalidating).toBe(false)
+    })
+
+    it('keeps an announced available update when the committed pull sees the same active release', async () => {
+      let announcedActive = 'release-a'
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({
+        revalidationReleaseId: 'release-b',
+        revalidationStatus: 'updated',
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            return Response.json(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: announcedActive },
+              },
+              { headers: fwaKernelStateHeaders() },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            // The committed install becomes the kernel's active release.
+            announcedActive = 'release-b'
+            return Response.json({
+              localEdgeEnabled: true,
+              release: { releaseId: 'release-b' },
+              status: 'updated',
+            })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      // The document's own visible revalidate announces the update through a
+      // fresh kernel pull.
+      const outcome = runtime.revalidate()
+      await outcome
+      await vi.waitFor(() => {
+        expect(runtime.getState()).toMatchObject({
+          phase: 'ready',
+          releaseId: 'release-a',
+          availableReleaseId: 'release-b',
+          updateAvailable: true,
+        })
+      })
+
+      // The kernel commit broadcast pulls a snapshot whose active release is the
+      // one it just committed (release-b). The loader keeps the announcement.
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(
+            ([input]) => String(input) === '/__fwa/state',
+          ),
+        ).toHaveLength(3)
+      })
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        availableReleaseId: 'release-b',
+        updateAvailable: true,
+      })
+    })
+
+    it('drops a revalidation response when the controller changes during body parsing', async () => {
+      const replacementInstance = '00000000-0000-4000-8000-000000000002'
+      let revalidateCall = 0
+      let stateCall = 0
+      let releaseBody!: () => void
+      let bodyStarted!: () => void
+      const bodyGate = new Promise<void>((resolve) => {
+        releaseBody = resolve
+      })
+      const bodyParsing = new Promise<void>((resolve) => {
+        bodyStarted = resolve
+      })
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            const kernelInstanceId =
+              stateCall === 1 ? testKernelInstanceId : replacementInstance
+            return Response.json(
+              {
+                kernelInstanceId,
+                observationRevision: 1,
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              { headers: fwaKernelStateHeaders(fwaKernelProtocolVersion) },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidateCall += 1
+            if (revalidateCall === 1) {
+              return orderedKernelResult(
+                {
+                  localEdgeEnabled: true,
+                  release: { releaseId: 'release-a' },
+                  status: 'current',
+                },
+                1,
+              )
+            }
+            const response = new Response('{}', {
+              headers: fwaKernelStateHeaders(fwaKernelProtocolVersion),
+            })
+            vi.spyOn(response, 'json').mockImplementation(async () => {
+              bodyStarted()
+              await bodyGate
+              return {
+                kernelInstanceId: testKernelInstanceId,
+                observationRevision: 3,
+                attemptId: 2,
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-b' },
+                status: 'updated',
+              }
+            })
+            return response
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      const revalidation = runtime.revalidate()
+      await bodyParsing
+      serviceWorker.controller = {
+        scriptURL: workerUrl,
+      } as ServiceWorker
+      serviceWorker.dispatchEvent(new Event('controllerchange'))
+      releaseBody()
+
+      await expect(revalidation).resolves.toBe('failed')
+      await vi.waitFor(() => expect(stateCall).toBeGreaterThanOrEqual(2))
+      expect(runtime.getState()).toMatchObject({
+        releaseId: 'release-a',
+        updateAvailable: false,
+      })
+    })
+
+    it('accepts a lower count when the same release starts a newer attempt', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+      const source = controllerSource(serviceWorker)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            observationRevision: 10,
+            attemptId: 10,
+            releaseId: 'release-b',
+            completedAssets: 7,
+            totalAssets: 12,
+          },
+          source,
+        ),
+      )
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            observationRevision: 12,
+            attemptId: 12,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 12,
+          },
+          source,
+        ),
+      )
+
+      expect(runtime.getState().revalidationProgress).toEqual({
+        releaseId: 'release-b',
+        completedAssets: 1,
+        totalAssets: 12,
+      })
+    })
+
+    it('defers a settled pull when every snapshot is overtaken by progress', async () => {
+      let raceSnapshots = false
+      let stateCallCount = 0
+      let progressRevision = 10
+      let completedAssets = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            if (!raceSnapshots) {
+              return orderedKernelSnapshot(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                1,
+              )
+            }
+            const staleRevision = progressRevision
+            const staleCompletedAssets = completedAssets
+            progressRevision += 1
+            completedAssets += 1
+            serviceWorker.dispatchEvent(
+              kernelMessage(
+                {
+                  type: fwaRevalidationProgressMessageType,
+                  observationRevision: progressRevision,
+                  attemptId: 10,
+                  releaseId: 'release-b',
+                  completedAssets,
+                  totalAssets: 20,
+                },
+                controllerSource(serviceWorker),
+              ),
+            )
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              staleRevision,
+              {
+                attemptId: 10,
+                releaseId: 'release-b',
+                completedAssets: staleCompletedAssets,
+                totalAssets: 20,
+              },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              },
+              1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      const startupStateCalls = stateCallCount
+      raceSnapshots = true
+
+      await expect(runtime.revalidate()).resolves.toBe('current')
+
+      expect(stateCallCount).toBe(startupStateCalls + 8)
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        revalidating: false,
+        revalidationProgress: {
+          releaseId: 'release-b',
+          completedAssets: 8,
+          totalAssets: 20,
+        },
+      })
+      expect(runtime.getState().message).not.toContain('did not converge')
+    })
+
+    it('defers a conflicting snapshot after one recovery read', async () => {
+      let returnConflict = false
+      let stateCallCount = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              returnConflict ? 10 : 1,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              },
+              1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      const source = controllerSource(serviceWorker)
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            observationRevision: 10,
+            attemptId: 10,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 10,
+          },
+          source,
+        ),
+      )
+      returnConflict = true
+      const callsBeforeRecovery = stateCallCount
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationProgressMessageType, releaseId: 'invalid' },
+          source,
+        ),
+      )
+
+      await vi.waitFor(() =>
+        expect(stateCallCount).toBe(callsBeforeRecovery + 1),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(stateCallCount).toBe(callsBeforeRecovery + 1)
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        revalidationProgress: {
+          releaseId: 'release-b',
+          completedAssets: 1,
+          totalAssets: 10,
+        },
+      })
+    })
+
+    it('drops superseded progress without pulling but recovers a foreign instance', async () => {
+      let stateCallCount = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              stateCallCount === 1 ? 1 : 20,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              },
+              1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      const source = controllerSource(serviceWorker)
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            observationRevision: 12,
+            attemptId: 10,
+            releaseId: 'release-b',
+            completedAssets: 2,
+            totalAssets: 10,
+          },
+          source,
+        ),
+      )
+      const callsBeforeSuperseded = stateCallCount
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            observationRevision: 11,
+            attemptId: 10,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 10,
+          },
+          source,
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(stateCallCount).toBe(callsBeforeSuperseded)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            kernelInstanceId: '00000000-0000-4000-8000-000000000099',
+            observationRevision: 1,
+            attemptId: 1,
+            releaseId: 'release-c',
+            completedAssets: 1,
+            totalAssets: 10,
+          },
+          source,
+        ),
+      )
+      await vi.waitFor(() => expect(stateCallCount).toBe(callsBeforeSuperseded + 1))
+    })
+
+    it('retries a delayed lower-revision snapshot without resurrecting old attempt progress', async () => {
+      let stateCall = 0
+      let liveRevision = 12
+      let liveCompletedAssets = 1
+      let delayNextState = false
+      let resolveStale!: (response: Response) => void
+      const staleSnapshot = new Promise<Response>((resolve) => {
+        resolveStale = resolve
+      })
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCall += 1
+            if (stateCall === 1) {
+              return orderedKernelSnapshot(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                1,
+              )
+            }
+            if (delayNextState) {
+              delayNextState = false
+              return staleSnapshot
+            }
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              liveRevision,
+              {
+                attemptId: 12,
+                releaseId: 'release-b',
+                completedAssets: liveCompletedAssets,
+                totalAssets: 12,
+              },
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              },
+              1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      const startupStateCalls = stateCall
+      delayNextState = true
+      const source = controllerSource(serviceWorker)
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+          },
+          source,
+        ),
+      )
+      await vi.waitFor(() => expect(stateCall).toBe(startupStateCalls + 1))
+      liveRevision = 13
+      liveCompletedAssets = 2
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            observationRevision: liveRevision,
+            attemptId: 12,
+            releaseId: 'release-b',
+            completedAssets: liveCompletedAssets,
+            totalAssets: 12,
+          },
+          source,
+        ),
+      )
+      resolveStale(
+        orderedKernelSnapshot(
+          {
+            localEdgeEnabled: true,
+            mode: 'active',
+            release: { releaseId: 'release-a' },
+          },
+          12,
+          {
+            attemptId: 12,
+            releaseId: 'release-b',
+            completedAssets: 1,
+            totalAssets: 12,
+          },
+        ),
+      )
+
+      await vi.waitFor(() =>
+        expect(stateCall).toBeGreaterThanOrEqual(startupStateCalls + 2),
+      )
+      expect(runtime.getState().revalidationProgress).toEqual({
+        releaseId: 'release-b',
+        completedAssets: 2,
+        totalAssets: 12,
+      })
+    })
+
+    it('publishes revalidationProgress from a matching progress message', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+        revalidationProgress: {
+          releaseId: 'release-b',
+          completedAssets: 3,
+          totalAssets: 12,
+        },
+      })
+      expect(runtime.getState().revalidating).toBe(false)
+    })
+
+    it('pulls and publishes the snapshot after a committed message', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      await settle(runtime)
+      const stateFetchesBefore = fetchMock.mock.calls.filter(
+        ([input]) => String(input) === '/__fwa/state',
+      ).length
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+
+      await vi.waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(
+            ([input]) => String(input) === '/__fwa/state',
+          ),
+        ).toHaveLength(stateFetchesBefore + 1)
+      })
+    })
+
+    it('ignores messages from a worker that is not the current controller', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      await settle(runtime)
+      const stateFetchesBefore = fetchMock.mock.calls.filter(
+        ([input]) => String(input) === '/__fwa/state',
+      ).length
+      const foreignWorker = { scriptURL: 'https://app.example/other-sw.js' }
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationProgressMessageType,
+            releaseId: 'release-b',
+            completedAssets: 3,
+            totalAssets: 12,
+          },
+          foreignWorker,
+        ),
+      )
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          foreignWorker,
+        ),
+      )
+
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input]) => String(input) === '/__fwa/state',
+        ),
+      ).toHaveLength(stateFetchesBefore)
+    })
+
+    it('ignores malformed progress messages', async () => {
+      const { runtime, serviceWorker } = createControlledKernel({})
+      await settle(runtime)
+
+      for (const data of [
+        'not-an-object',
+        { type: '__fwa:unknown' },
+        {
+          type: fwaRevalidationProgressMessageType,
+          releaseId: 'release-b',
+          completedAssets: '3',
+          totalAssets: 12,
+        },
+        {
+          type: fwaRevalidationProgressMessageType,
+          releaseId: 'release-b',
+          completedAssets: 13,
+          totalAssets: 12,
+        },
+      ]) {
+        serviceWorker.dispatchEvent(
+          kernelMessage(data, controllerSource(serviceWorker)),
+        )
+      }
+
+      expect(runtime.getState().revalidationProgress).toBeUndefined()
+    })
+
+    it('removes the message listener when stopped', async () => {
+      const { runtime, serviceWorker, fetchMock } = createControlledKernel({})
+      await settle(runtime)
+      runtime.stop()
+      const stateFetchesBefore = fetchMock.mock.calls.filter(
+        ([input]) => String(input) === '/__fwa/state',
+      ).length
+
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input]) => String(input) === '/__fwa/state',
+        ),
+      ).toHaveLength(stateFetchesBefore)
     })
   })
 })

@@ -118,12 +118,13 @@ The `window.__fwa` object and `__fwa` query namespace remain stable FWA protocol
 - [Architecture](docs/architecture.md)
 - [Build-time configuration and host ownership](docs/config-contract.md)
 - [Loader and client facade](docs/loader-contract.md)
+- [Revalidation observation ordering](docs/revalidation-observation.md)
 - [Navigation and request ownership](docs/navigation-contract.md)
 - [Design boundaries](docs/design-lock.md)
 
 ## Current support boundary
 
-The automated browser matrix targets Chromium. Firefox and Safari are not yet part of the public automated support claim. Registration and revalidation have no package-defined wall-clock timeout. Release assets are bounded to 16 MiB each and 64 MiB per release, but individual asset verification currently materializes one response in memory.
+The automated browser matrix targets Chromium. Firefox and Safari are not yet part of the public automated support claim. Release authority transitions, client pin pruning, and cache cleanup use the Web Locks API to serialize state across overlapping Service Worker globals; descriptor and asset network I/O remain outside the lock. Browsers without Web Locks retain an already-active older worker's offline reads, while activation of this kernel and new candidate installation fail closed. Descriptor fetches time out after 10 seconds and individual asset fetches after 30 seconds; registration has no package-defined wall-clock timeout. Release assets are bounded to 16 MiB each and 64 MiB per release, but individual asset verification currently materializes one response in memory.
 
 ## License
 

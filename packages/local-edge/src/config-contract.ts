@@ -38,8 +38,13 @@ export const localEdgeModeQueryParameter = '__fwa'
 export const localEdgeDebugQueryParameter = '__fwa_debug'
 export const fwaKernelProbeHeaderName = 'X-FWA-Kernel'
 export const fwaKernelProtocolHeaderName = 'X-FWA-Kernel-Protocol'
-export const fwaKernelProtocolVersion = 1
+export const fwaKernelProtocolVersion = 2
+export const fwaMinimumKernelProtocolVersion = 1
+export const fwaOrderedProgressProtocolVersion = 2
 export const fwaTakeoverMessageType = '__fwa:takeover'
+export const fwaRevalidationProgressMessageType = '__fwa:revalidation-progress'
+export const fwaRevalidationCommittedMessageType = '__fwa:revalidation-committed'
+export const fwaRevalidationFailedMessageType = '__fwa:revalidation-failed'
 export type LocalEdgeNavigationMode = 'network' | 'reset'
 export type LocalEdgeDebugSeed = 'enable' | 'disable' | 'reset'
 

@@ -11,6 +11,7 @@ export type {
   FwaLocalEdgeApi,
   LocalEdgeClientPhase,
   LocalEdgeClientState,
+  LocalEdgeRevalidationProgress,
   LocalEdgeRevalidationOutcome,
   LocalEdgeStateListener,
   LocalEdgeUpdateCheckCommandConfig,

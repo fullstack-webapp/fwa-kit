@@ -19,6 +19,7 @@ import {
   activateReleaseRuntime,
   getLocalEdgeSnapshot,
   isReleaseComplete,
+  hasResetStarted,
   isLocalEdgeRuntimeEnabled,
   pinRequestClient,
   readReleaseAsset,
@@ -77,6 +78,13 @@ async function handleRequest(event: FetchEvent) {
   }
   if (navigationMode === 'network' && request.mode === 'navigate') {
     return fetch(request, { cache: 'reload' })
+  }
+
+  if (hasResetStarted()) {
+    // A reset tears this worker instance down: remaining app requests pass
+    // through to the network without touching (and never re-creating) the
+    // metadata database the reset just deleted.
+    return fetch(request)
   }
 
   if (await usesNetworkOnlyClient(event.clientId)) {
@@ -153,12 +161,26 @@ async function stateResponse(request: Request) {
     })
   }
 
-  return Response.json(await getLocalEdgeSnapshot(), {
-    headers: {
-      'Cache-Control': 'no-store',
-      ...fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath),
-    },
-  })
+  const identityHeaders = fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath)
+  try {
+    return Response.json(await getLocalEdgeSnapshot(), {
+      headers: {
+        'Cache-Control': 'no-store',
+        ...identityHeaders,
+      },
+    })
+  } catch {
+    return Response.json(
+      { error: 'kernel snapshot temporarily unavailable' },
+      {
+        status: 503,
+        headers: {
+          'Cache-Control': 'no-store',
+          ...identityHeaders,
+        },
+      },
+    )
+  }
 }
 
 async function revalidationResponse(event: FetchEvent) {
@@ -178,7 +200,10 @@ async function revalidationResponse(event: FetchEvent) {
     const result = await revalidateReleaseForClient(event.clientId)
 
     return Response.json(result, {
-      headers: { 'Cache-Control': 'no-store' },
+      headers: {
+        'Cache-Control': 'no-store',
+        ...fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath),
+      },
     })
   } catch (error) {
     return Response.json(
@@ -188,7 +213,10 @@ async function revalidationResponse(event: FetchEvent) {
       },
       {
         status: 503,
-        headers: { 'Cache-Control': 'no-store' },
+        headers: {
+          'Cache-Control': 'no-store',
+          ...fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath),
+        },
       },
     )
   }

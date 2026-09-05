@@ -1,9 +1,12 @@
 import type { FwaLoaderPaths } from './loader-paths.ts'
+import type { LocalEdgeRevalidationProgress } from '../release.ts'
 
 export {
   deriveFwaLoaderPaths,
   type FwaLoaderPaths,
 } from './loader-paths.ts'
+
+export type { LocalEdgeRevalidationProgress }
 
 export const fwaGlobalReadyEventName = '__fwa:ready'
 export const fwaLoaderVersion = '0.1.0-beta.0'
@@ -23,6 +26,7 @@ export interface LocalEdgeClientState {
   availableReleaseId?: string
   revalidating: boolean
   updateAvailable: boolean
+  revalidationProgress?: LocalEdgeRevalidationProgress
   message: string
 }
 

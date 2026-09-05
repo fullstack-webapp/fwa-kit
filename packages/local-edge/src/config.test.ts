@@ -36,7 +36,7 @@ describe('defineLocalEdgeConfig', () => {
   it('defines the worker path and protocol identity announced by the kernel', () => {
     expect(fwaKernelIdentityHeadersFor('/app/worker.js')).toEqual({
       'X-FWA-Kernel': '/app/worker.js',
-      'X-FWA-Kernel-Protocol': '1',
+      'X-FWA-Kernel-Protocol': '2',
     })
   })
 
