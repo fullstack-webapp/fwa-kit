@@ -8,6 +8,8 @@ const previousReleaseKey = 'previousRelease'
 const retainedReleasesKey = 'retainedReleases'
 const clientReleasePinsKey = 'clientReleasePins'
 const candidateJournalKey = 'candidateJournal'
+const releaseObservationSeqKey = 'releaseObservationSeq'
+const appliedReleaseObservationSeqKey = 'appliedReleaseObservationSeq'
 const metadataEpochKey = 'metadataEpoch'
 const localEdgeEnabledKey = 'localEdgeEnabled'
 
@@ -26,6 +28,7 @@ export interface CandidateJournal {
   kernelInstanceId: string
   attemptId: number
   releaseId: string
+  releaseObservationSeq: number
   phase: 'installing' | 'verified' | 'cleaning'
 }
 
@@ -60,6 +63,119 @@ export async function readOrCreateMetadataEpoch(allowCreate: boolean) {
   }
 }
 
+export interface ReleaseObservation {
+  metadataEpoch: string
+  observationSeq: number
+}
+
+export async function allocateReleaseObservation(metadataEpoch: string) {
+  const database = await openDatabase()
+
+  try {
+    return await new Promise<ReleaseObservation>((resolve, reject) => {
+      const transaction = database.transaction(storeName, 'readwrite')
+      const store = transaction.objectStore(storeName)
+      const epochRequest = store.get(metadataEpochKey)
+      const sequenceRequest = store.get(releaseObservationSeqKey)
+      let observationSeq = 0
+      const allocate = () => {
+        if (
+          observationSeq !== 0 ||
+          epochRequest.readyState !== 'done' ||
+          sequenceRequest.readyState !== 'done'
+        ) {
+          return
+        }
+        if (epochRequest.result !== metadataEpoch) {
+          transaction.abort()
+          return
+        }
+        observationSeq =
+          typeof sequenceRequest.result === 'number' &&
+          Number.isSafeInteger(sequenceRequest.result) &&
+          sequenceRequest.result >= 0
+            ? sequenceRequest.result + 1
+            : 1
+        store.put(observationSeq, releaseObservationSeqKey)
+      }
+      epochRequest.onsuccess = allocate
+      sequenceRequest.onsuccess = allocate
+      transaction.oncomplete = () => resolve({ metadataEpoch, observationSeq })
+      transaction.onerror = () => reject(transaction.error)
+      transaction.onabort = () =>
+        reject(new Error('release observation lost metadata authority'))
+    })
+  } finally {
+    database.close()
+  }
+}
+
+export async function applyLocalEdgeModeIfLatest(
+  observation: ReleaseObservation,
+  localEdgeEnabled: boolean,
+) {
+  const database = await openDatabase()
+
+  try {
+    return await new Promise<{
+      applied: boolean
+      previousCandidate?: CandidateJournal
+    }>((resolve, reject) => {
+      const transaction = database.transaction(storeName, 'readwrite')
+      const store = transaction.objectStore(storeName)
+      const epochRequest = store.get(metadataEpochKey)
+      const issuedRequest = store.get(releaseObservationSeqKey)
+      const appliedRequest = store.get(appliedReleaseObservationSeqKey)
+      const candidateRequest = store.get(candidateJournalKey)
+      let applied = false
+      let previousCandidate: CandidateJournal | undefined
+      const apply = () => {
+        if (
+          applied ||
+          epochRequest.readyState !== 'done' ||
+          issuedRequest.readyState !== 'done' ||
+          appliedRequest.readyState !== 'done' ||
+          candidateRequest.readyState !== 'done'
+        ) {
+          return
+        }
+        if (epochRequest.result !== observation.metadataEpoch) {
+          transaction.abort()
+          return
+        }
+        const appliedSeq =
+          typeof appliedRequest.result === 'number' ? appliedRequest.result : 0
+        if (
+          issuedRequest.result !== observation.observationSeq ||
+          appliedSeq >= observation.observationSeq
+        ) {
+          return
+        }
+        applied = true
+        previousCandidate = isRecord(candidateRequest.result)
+          ? (candidateRequest.result as unknown as CandidateJournal)
+          : undefined
+        store.put(localEdgeEnabled, localEdgeEnabledKey)
+        store.put(
+          observation.observationSeq,
+          appliedReleaseObservationSeqKey,
+        )
+        store.delete(candidateJournalKey)
+      }
+      epochRequest.onsuccess = apply
+      issuedRequest.onsuccess = apply
+      appliedRequest.onsuccess = apply
+      candidateRequest.onsuccess = apply
+      transaction.oncomplete = () => resolve({ applied, previousCandidate })
+      transaction.onerror = () => reject(transaction.error)
+      transaction.onabort = () =>
+        reject(new Error('release observation lost metadata authority'))
+    })
+  } finally {
+    database.close()
+  }
+}
+
 export async function readCandidateJournal(metadataEpoch: string) {
   const database = await openDatabase()
 
@@ -84,40 +200,72 @@ export async function readCandidateJournal(metadataEpoch: string) {
   }
 }
 
-export async function claimCandidateJournal(journal: CandidateJournal) {
+export async function claimCandidateJournalIfLatest(
+  journal: CandidateJournal,
+  observation: ReleaseObservation,
+) {
   const database = await openDatabase()
 
   try {
-    return await new Promise<CandidateJournal | undefined>((resolve, reject) => {
+    return await new Promise<{
+      claimed: boolean
+      previous?: CandidateJournal
+    }>((resolve, reject) => {
       const transaction = database.transaction(storeName, 'readwrite')
       const store = transaction.objectStore(storeName)
       const epochRequest = store.get(metadataEpochKey)
-      const request = store.get(candidateJournalKey)
-      let previous: CandidateJournal | undefined
+      const candidateRequest = store.get(candidateJournalKey)
+      const issuedRequest = store.get(releaseObservationSeqKey)
+      const appliedRequest = store.get(appliedReleaseObservationSeqKey)
       let claimed = false
+      let previous: CandidateJournal | undefined
       const claim = () => {
         if (
           claimed ||
           epochRequest.readyState !== 'done' ||
-          request.readyState !== 'done'
+          candidateRequest.readyState !== 'done' ||
+          issuedRequest.readyState !== 'done' ||
+          appliedRequest.readyState !== 'done'
         ) {
           return
         }
-        if (epochRequest.result !== journal.metadataEpoch) {
+        if (epochRequest.result !== observation.metadataEpoch) {
           transaction.abort()
           return
         }
+        if (
+          journal.metadataEpoch !== observation.metadataEpoch ||
+          journal.releaseObservationSeq !== observation.observationSeq
+        ) {
+          transaction.abort()
+          return
+        }
+        const appliedSeq =
+          typeof appliedRequest.result === 'number' ? appliedRequest.result : 0
+        if (
+          issuedRequest.result !== observation.observationSeq ||
+          appliedSeq >= observation.observationSeq
+        ) {
+          return
+        }
         claimed = true
-        previous = isRecord(request.result)
-          ? (request.result as unknown as CandidateJournal)
+        previous = isRecord(candidateRequest.result)
+          ? (candidateRequest.result as unknown as CandidateJournal)
           : undefined
         store.put(journal, candidateJournalKey)
+        store.put(
+          observation.observationSeq,
+          appliedReleaseObservationSeqKey,
+        )
       }
       epochRequest.onsuccess = claim
-      request.onsuccess = claim
-      transaction.oncomplete = () => resolve(previous)
+      candidateRequest.onsuccess = claim
+      issuedRequest.onsuccess = claim
+      appliedRequest.onsuccess = claim
+      transaction.oncomplete = () => resolve({ claimed, previous })
       transaction.onerror = () => reject(transaction.error)
-      transaction.onabort = () => reject(transaction.error)
+      transaction.onabort = () =>
+        reject(new Error('release observation lost metadata authority'))
     })
   } finally {
     database.close()
@@ -251,18 +399,21 @@ export async function writeReleaseStateForCandidate(
       const store = transaction.objectStore(storeName)
       const epochRequest = store.get(metadataEpochKey)
       const candidateRequest = store.get(candidateJournalKey)
+      const issuedRequest = store.get(releaseObservationSeqKey)
       let ownerVerified = false
       const verifyOwner = () => {
         if (
           ownerVerified ||
           epochRequest.readyState !== 'done' ||
-          candidateRequest.readyState !== 'done'
+          candidateRequest.readyState !== 'done' ||
+          issuedRequest.readyState !== 'done'
         ) {
           return
         }
         if (
           epochRequest.result !== owner.metadataEpoch ||
-          !candidateOwnerMatches(candidateRequest.result, owner)
+          !candidateOwnerMatches(candidateRequest.result, owner) ||
+          issuedRequest.result !== owner.releaseObservationSeq
         ) {
           transaction.abort()
           return
@@ -282,6 +433,7 @@ export async function writeReleaseStateForCandidate(
       }
       epochRequest.onsuccess = verifyOwner
       candidateRequest.onsuccess = verifyOwner
+      issuedRequest.onsuccess = verifyOwner
       transaction.oncomplete = () => resolve()
       transaction.onerror = () => reject(transaction.error)
       transaction.onabort = () => reject(new Error('candidate install lost metadata authority'))
@@ -609,7 +761,8 @@ function candidateOwnerMatches(
     value.metadataEpoch === owner.metadataEpoch &&
     value.kernelInstanceId === owner.kernelInstanceId &&
     value.attemptId === owner.attemptId &&
-    value.releaseId === owner.releaseId
+    value.releaseId === owner.releaseId &&
+    value.releaseObservationSeq === owner.releaseObservationSeq
   )
 }
 

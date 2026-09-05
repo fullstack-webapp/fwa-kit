@@ -8,13 +8,15 @@ import {
 const worker = self as unknown as ServiceWorkerGlobalScope
 const maxAssetSize = 16 * 1024 * 1024
 const maxReleaseSize = 64 * 1024 * 1024
+const descriptorFetchTimeoutMs = 10_000
+const assetFetchTimeoutMs = 30_000
 
 export async function fetchVerifiedReleaseDescriptor(signal: AbortSignal) {
   const descriptorUrl = new URL(localEdgeConfig.descriptorPath, worker.location.origin)
   const response = await fetch(descriptorUrl, {
     cache: 'no-store',
     redirect: 'follow',
-    signal,
+    signal: boundedFetchSignal(signal, descriptorFetchTimeoutMs),
   })
   if (response.status !== 200) {
     throw new Error(`release descriptor returned ${response.status}`)
@@ -38,7 +40,7 @@ export async function fetchVerifiedAsset(asset: AppReleaseAsset, signal: AbortSi
   const response = await fetch(assetUrl, {
     cache: 'reload',
     redirect: 'follow',
-    signal,
+    signal: boundedFetchSignal(signal, assetFetchTimeoutMs),
   })
   if (response.status !== 200) {
     throw new Error(`${asset.path} returned ${response.status}`)
@@ -72,6 +74,10 @@ export async function fetchVerifiedAsset(asset: AppReleaseAsset, signal: AbortSi
     status: 200,
     headers: verifiedHeaders,
   })
+}
+
+function boundedFetchSignal(signal: AbortSignal, timeoutMs: number) {
+  return AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
 }
 
 function parseReleaseDescriptor(value: unknown): AppReleaseDescriptor {

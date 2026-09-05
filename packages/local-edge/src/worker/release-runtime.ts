@@ -16,12 +16,13 @@ import type {
   OrderedLocalEdgeSnapshot,
 } from '../revalidation-observation.ts'
 import {
-  claimCandidateJournal,
+  allocateReleaseObservation,
+  applyLocalEdgeModeIfLatest,
+  claimCandidateJournalIfLatest,
   clearCandidateJournalIfOwned,
   deleteReleaseMetadata,
   markCandidateJournalCleaningIfOwned,
   pruneClientReleasePins,
-  readCandidateJournal,
   readClientReleasePins,
   readKernelSnapshotMetadata,
   readLocalEdgeEnabled,
@@ -29,7 +30,6 @@ import {
   readReleaseState,
   updateClientReleasePin,
   writeCandidateJournalIfOwned,
-  writeLocalEdgeEnabled,
   writeReleaseStateForCandidate,
   writeRetainedReleasesIfActive,
   type CandidateJournal,
@@ -265,23 +265,40 @@ async function revalidateRelease(
   let immediateResult: OrderedLocalEdgeRevalidationResult | undefined
 
   try {
-    // Descriptor observation and its durable authority transition share the
-    // cache lock. A later disable therefore cannot be overwritten by an older
-    // enabled descriptor that yielded before claiming candidate authority.
+    const releaseObservation = await withCandidateCacheLock(() =>
+      allocateReleaseObservation(requiredMetadataEpoch()),
+    )
+    const descriptor = await fetchVerifiedReleaseDescriptor(signal)
+
     await withCandidateCacheLock(async () => {
-      const descriptor = await fetchVerifiedReleaseDescriptor(signal)
       const wasLocalEdgeEnabled = await readLocalEdgeEnabled(
         requiredMetadataEpoch(),
       )
       if (!descriptor.localEdgeEnabled) {
-        await setLocalEdgeEnabled(false)
-        await cleanupAbandonedCandidateLocked(
-          await readReleaseState(requiredMetadataEpoch()),
-        )
-        immediateResult = orderedResult({
-          status: wasLocalEdgeEnabled ? 'disabled' : 'disabled-current',
-          localEdgeEnabled: false,
-          release: (await readReleaseState(requiredMetadataEpoch())).active,
+        await runKernelLifecycleMutation(async () => {
+          const transition = await applyLocalEdgeModeIfLatest(
+            releaseObservation,
+            false,
+          )
+          const releaseState = await readReleaseState(requiredMetadataEpoch())
+          if (!transition.applied) {
+            immediateResult = orderedResult({
+              status: wasLocalEdgeEnabled ? 'current' : 'disabled-current',
+              localEdgeEnabled: wasLocalEdgeEnabled,
+              release: releaseState.active,
+            })
+            return
+          }
+          await cleanupSupersededCandidateCache(
+            transition.previousCandidate,
+            releaseState,
+          )
+          advanceKernelObservation()
+          immediateResult = orderedResult({
+            status: wasLocalEdgeEnabled ? 'disabled' : 'disabled-current',
+            localEdgeEnabled: false,
+            release: releaseState.active,
+          })
         })
         return
       }
@@ -291,18 +308,42 @@ async function revalidateRelease(
       }
       release = descriptor.release
       candidateCacheName = releaseCacheName(release.releaseId)
-      const releaseState = await cleanupUnusedRetainedReleasesLocked()
+      const releaseState = await readReleaseState(requiredMetadataEpoch())
       const activeRelease = releaseState.active
       if (
         activeRelease?.releaseId === release.releaseId &&
         (await isReleaseComplete(activeRelease))
       ) {
-        await cleanupAbandonedCandidateLocked(releaseState)
-        await setLocalEdgeEnabled(true)
-        immediateResult = orderedResult({
-          status: wasLocalEdgeEnabled ? 'current' : 'enabled',
-          localEdgeEnabled: true,
-          release: activeRelease,
+        await runKernelLifecycleMutation(async () => {
+          const transition = await applyLocalEdgeModeIfLatest(
+            releaseObservation,
+            true,
+          )
+          if (!transition.applied) {
+            const currentEnabled = await readLocalEdgeEnabled(
+              requiredMetadataEpoch(),
+            )
+            immediateResult = orderedResult({
+              status: currentEnabled ? 'current' : 'disabled-current',
+              localEdgeEnabled: currentEnabled,
+              release: (
+                await readReleaseState(requiredMetadataEpoch())
+              ).active,
+            })
+            return
+          }
+          const currentReleaseState =
+            await cleanupUnusedRetainedReleasesLocked(releaseState)
+          await cleanupSupersededCandidateCache(
+            transition.previousCandidate,
+            currentReleaseState,
+          )
+          advanceKernelObservation()
+          immediateResult = orderedResult({
+            status: wasLocalEdgeEnabled ? 'current' : 'enabled',
+            localEdgeEnabled: true,
+            release: activeRelease,
+          })
         })
         return
       }
@@ -315,12 +356,25 @@ async function revalidateRelease(
           kernelInstanceId: identity.kernelInstanceId,
           attemptId,
           releaseId: release.releaseId,
+          releaseObservationSeq: releaseObservation.observationSeq,
         }
-        const previousCandidate = await claimCandidateJournal({
-          ...candidateOwner,
-          phase: 'cleaning',
-        })
-        commitBaseState = await readReleaseState(requiredMetadataEpoch())
+        const claim = await claimCandidateJournalIfLatest(
+          { ...candidateOwner, phase: 'cleaning' },
+          releaseObservation,
+        )
+        if (!claim.claimed) {
+          attemptId = 0
+          const currentEnabled = await readLocalEdgeEnabled(
+            requiredMetadataEpoch(),
+          )
+          immediateResult = orderedResult({
+            status: currentEnabled ? 'current' : 'disabled-current',
+            localEdgeEnabled: currentEnabled,
+            release: (await readReleaseState(requiredMetadataEpoch())).active,
+          })
+          return
+        }
+        commitBaseState = await cleanupUnusedRetainedReleasesLocked()
         revalidationInstall = {
           attemptId,
           state: beginRevalidationInstall(
@@ -329,17 +383,12 @@ async function revalidateRelease(
           ),
         }
 
-        if (
-          previousCandidate &&
-          previousCandidate.releaseId !== release.releaseId &&
-          commitBaseState.active?.releaseId !== previousCandidate.releaseId &&
-          !commitBaseState.retained.some(
-            (retainedRelease) =>
-              retainedRelease.releaseId === previousCandidate.releaseId,
-          )
-        ) {
-          await caches.delete(releaseCacheName(previousCandidate.releaseId))
-        }
+        await cleanupSupersededCandidateCache(
+          claim.previous?.releaseId === release.releaseId
+            ? undefined
+            : claim.previous,
+          commitBaseState,
+        )
         if (!(await writeCandidateJournalIfOwned(candidateOwner, 'installing'))) {
           throw new Error('Local Edge candidate ownership was superseded')
         }
@@ -493,6 +542,7 @@ async function finishReset() {
   }
   revalidationInstall = undefined
 
+  let metadataDeletion!: Promise<void>
   await withCandidateCacheLock(async () => {
     const cacheNames = await caches.keys()
     await Promise.all(
@@ -500,15 +550,11 @@ async function finishReset() {
         .filter((cacheName) => cacheName.startsWith(releaseCachePrefix))
         .map((cacheName) => caches.delete(cacheName)),
     )
-    await deleteReleaseMetadata()
+    // Calling this queues the versionchange request synchronously. Release the
+    // cache lock before waiting for other globals to close their IDB handles.
+    metadataDeletion = deleteReleaseMetadata()
   })
-}
-
-async function setLocalEdgeEnabled(enabled: boolean) {
-  await runKernelLifecycleMutation(async () => {
-    await writeLocalEdgeEnabled(requiredMetadataEpoch(), enabled)
-    advanceKernelObservation()
-  })
+  await metadataDeletion
 }
 
 async function pinClientRelease(clientId: string, releaseId: string) {
@@ -550,33 +596,21 @@ async function readClientReleasePin(clientId: string) {
   return (await readClientReleasePins(requiredMetadataEpoch())).get(clientId)
 }
 
-async function cleanupAbandonedCandidateLocked(releaseState: ReleaseState) {
-  const abandoned = await readCandidateJournal(requiredMetadataEpoch())
-  if (!abandoned) {
+async function cleanupSupersededCandidateCache(
+  candidate: CandidateJournal | undefined,
+  releaseState: ReleaseState,
+) {
+  if (!candidate) {
     return
   }
-
-  let cleanupOwner!: Omit<CandidateJournal, 'phase'>
-  await runKernelLifecycleMutation(async () => {
-    const identity = advanceKernelObservation()
-    cleanupOwner = {
-      metadataEpoch: requiredMetadataEpoch(),
-      kernelInstanceId: identity.kernelInstanceId,
-      attemptId: identity.observationRevision,
-      releaseId: abandoned.releaseId,
-    }
-    await claimCandidateJournal({ ...cleanupOwner, phase: 'cleaning' })
-  })
-
   const isReferenced =
-    releaseState.active?.releaseId === abandoned.releaseId ||
+    releaseState.active?.releaseId === candidate.releaseId ||
     releaseState.retained.some(
-      (release) => release.releaseId === abandoned.releaseId,
+      (release) => release.releaseId === candidate.releaseId,
     )
   if (!isReferenced) {
-    await caches.delete(releaseCacheName(abandoned.releaseId))
+    await caches.delete(releaseCacheName(candidate.releaseId))
   }
-  await clearCandidateJournalIfOwned(cleanupOwner)
 }
 
 async function cleanupUnusedRetainedReleasesLocked(

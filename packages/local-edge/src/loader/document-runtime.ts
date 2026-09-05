@@ -4,15 +4,27 @@ import type {
   LocalEdgeSnapshot,
 } from '../release.ts'
 import {
+  isKernelObservationIdentity,
+  isKernelRevalidationProgress,
+  isOrderedLocalEdgeSnapshot,
+  isOrderedRevalidationResult,
+  reduceRevalidationObservation,
+  type OrderedLocalEdgeRevalidationResult,
+  type OrderedLocalEdgeSnapshot,
+  type RevalidationObservation,
+  type RevalidationObservationCursor,
+} from '../revalidation-observation.ts'
+import {
   defaultUpdateCheckIntervalMinutes,
   fwaRevalidationCommittedMessageType,
   fwaRevalidationFailedMessageType,
   fwaRevalidationProgressMessageType,
   isValidUpdateCheckIntervalMinutes,
-  localEdgeControlPathsFor,
+  fwaMinimumKernelProtocolVersion,
+  fwaOrderedProgressProtocolVersion,
   fwaKernelProbeHeaderName,
   fwaKernelProtocolHeaderName,
-  fwaKernelProtocolVersion,
+  localEdgeControlPathsFor,
   pathWithLocalEdgeNavigationMode,
   localEdgeNavigationModeFor,
 } from '../config-contract.ts'
@@ -53,6 +65,20 @@ interface LocalEdgeDocumentDependencies extends LocalEdgeRegistrationOwner {
   scheduler: LocalEdgeDocumentScheduler
 }
 
+type KernelSnapshotRead =
+  | { kind: 'uncontrolled' }
+  | { kind: 'incompatible' }
+  | { kind: 'unavailable'; error: Error }
+  | { kind: 'stale-controller' }
+  | { kind: 'legacy'; snapshot: LocalEdgeSnapshot }
+  | { kind: 'ordered'; snapshot: OrderedLocalEdgeSnapshot }
+
+type KernelRevalidationRead =
+  | { kind: 'failed' }
+  | { kind: 'stale-controller' }
+  | { kind: 'legacy'; result: LocalEdgeRevalidationResult }
+  | { kind: 'ordered'; result: OrderedLocalEdgeRevalidationResult }
+
 interface LocalEdgeDocumentRuntime {
   getState(): LocalEdgeClientState
   subscribe(listener: LocalEdgeStateListener): () => void
@@ -84,20 +110,11 @@ export function createLocalEdgeDocumentRuntime(
   let state = initialState
   let explicitNetworkOpen = false
   let settlePullChain: Promise<void> = Promise.resolve()
-  // Progress fetched from the kernel is void for a release whose install
-  // settled after the fetch began: a snapshot read that predates the settle
-  // can still carry the settled attempt's counts, and publishing it would
-  // resurrect progress that the terminal message already dropped. Terminal
-  // messages mark their release with the current sequence number; fetch
-  // publishers capture the sequence before awaiting and discard fetched
-  // progress for any release marked later than that.
-  let kernelEventSeq = 0
-  const settledAtSeq = new Map<string, number>()
-  // Progress published by a broadcast after an unscoped clear-read began is
-  // newer than that read's kernel view: the unscoped pull drops only the
-  // suspected-stale value it was asked to clear, never progress that
-  // arrived while its fetch was in flight.
-  let progressEventSeq = 0
+  let observationCursor: RevalidationObservationCursor = { phase: 'unknown' }
+  let controllerGeneration = 0
+  let orderedProgressEnabled = false
+  let lastKernelMode: LocalEdgeSnapshot['mode'] | undefined
+  let snapshotPullQueued = false
   let started = false
   let stopped = false
   let scheduledChecksStarted = false
@@ -140,357 +157,318 @@ export function createLocalEdgeDocumentRuntime(
       publishToListener(listener, state)
     }
   }
-  const progressSettledDuringFetch = (
-    progress: LocalEdgeRevalidationProgress,
-    startedAtSeq: number,
-  ) => {
-    const settledSeq = settledAtSeq.get(progress.releaseId)
-    return settledSeq !== undefined && settledSeq > startedAtSeq
+  const cursorProgress = () =>
+    observationCursor.phase === 'running'
+      ? observationCursor.progress
+      : undefined
+
+  const publishCursorProgress = () => {
+    const { revalidationProgress: _previous, ...rest } = state
+    void _previous
+    const progress = cursorProgress()
+    publish({ ...rest, ...(progress ? { revalidationProgress: progress } : undefined) })
   }
 
-  const fetchKernelSnapshot = async () => {
-    if (!navigator.serviceWorker.controller) {
-      return undefined
+  const fetchKernelSnapshot = async (): Promise<KernelSnapshotRead> => {
+    const controller = navigator.serviceWorker.controller
+    if (!controller) return { kind: 'uncontrolled' }
+    const generation = controllerGeneration
+    let response: Response
+    try {
+      response = await fetch(controlPaths.state, { cache: 'no-store' })
+    } catch (error) {
+      return { kind: 'unavailable', error: error instanceof Error ? error : new Error('runtime snapshot failed') }
     }
-
-    const response = await fetch(controlPaths.state, { cache: 'no-store' })
-    if (!response.ok) {
-      throw new Error(`runtime snapshot returned ${response.status}`)
+    if (generation !== controllerGeneration || controller !== navigator.serviceWorker.controller) {
+      return { kind: 'stale-controller' }
     }
-    const kernelProtocolVersion = Number(
-      response.headers.get(fwaKernelProtocolHeaderName),
-    )
+    const protocolVersion = Number(response.headers.get(fwaKernelProtocolHeaderName))
     if (
       response.headers.get(fwaKernelProbeHeaderName) !== config.workerPath ||
-      !Number.isSafeInteger(kernelProtocolVersion) ||
-      kernelProtocolVersion < fwaKernelProtocolVersion
-    ) {
-      throw new Error('active Service Worker does not expose the FWA kernel API')
+      !Number.isSafeInteger(protocolVersion) ||
+      protocolVersion < fwaMinimumKernelProtocolVersion
+    ) return { kind: 'incompatible' }
+    if (!response.ok) {
+      return { kind: 'unavailable', error: new Error(`runtime snapshot returned ${response.status}`) }
     }
-    const snapshot = await response.json()
-    if (!isLocalEdgeSnapshot(snapshot)) {
-      throw new Error('FWA kernel returned an invalid snapshot')
+    let value: unknown
+    try {
+      value = await response.json()
+    } catch {
+      return { kind: 'unavailable', error: new Error('FWA kernel returned unreadable snapshot JSON') }
     }
-    return snapshot
+    if (generation !== controllerGeneration || controller !== navigator.serviceWorker.controller) {
+      return { kind: 'stale-controller' }
+    }
+    if (protocolVersion >= fwaOrderedProgressProtocolVersion) {
+      return isOrderedLocalEdgeSnapshot(value)
+        ? { kind: 'ordered', snapshot: value }
+        : { kind: 'unavailable', error: new Error('FWA kernel returned an invalid ordered snapshot') }
+    }
+    return isLocalEdgeSnapshot(value)
+      ? { kind: 'legacy', snapshot: value }
+      : { kind: 'unavailable', error: new Error('FWA kernel returned an invalid snapshot') }
   }
 
-  const publishSnapshot = (
+  const publishStartupSnapshot = (
     snapshot: LocalEdgeSnapshot,
-    startedAtSeq: number,
+    progress?: LocalEdgeRevalidationProgress,
     warning?: string,
   ) => {
-    // A progress message can land while the fetch is in flight (the message
-    // channel is not serialized on the read chain): publish the freshest
-    // count, never a stale snapshot's regression. A snapshot read that
-    // predates its release's settle does not resurrect the counts the
-    // terminal message already dropped.
-    const fetchedProgress =
-      snapshot.revalidation &&
-      !progressSettledDuringFetch(snapshot.revalidation, startedAtSeq)
-        ? snapshot.revalidation
-        : undefined
-    const currentProgress = state.revalidationProgress
-    const revalidationProgress = fetchedProgress
-      ? !currentProgress ||
-        currentProgress.releaseId !== fetchedProgress.releaseId ||
-        currentProgress.completedAssets <= fetchedProgress.completedAssets
-        ? fetchedProgress
-        : currentProgress
-      : currentProgress
     publish(
       snapshot.mode === 'disabled'
         ? {
-            phase: 'network-only',
-            controlled: true,
-            revalidating: false,
+            phase: 'network-only', controlled: true, revalidating: false,
             updateAvailable: false,
-            ...(revalidationProgress
-              ? { revalidationProgress }
-              : undefined),
-            message:
-              'Local Edge 已由 release flag 禁用，当前使用 network baseline。',
+            ...(progress ? { revalidationProgress: progress } : undefined),
+            message: 'Local Edge 已由 release flag 禁用，当前使用 network baseline。',
           }
         : snapshot.mode === 'active' && snapshot.release
           ? {
-              phase: 'ready',
-              controlled: true,
-              releaseId: snapshot.release.releaseId,
-              revalidating: false,
+              phase: 'ready', controlled: true,
+              releaseId: snapshot.release.releaseId, revalidating: false,
               updateAvailable: false,
-              ...(revalidationProgress
-                ? { revalidationProgress }
-                : undefined),
-              message:
-                warning ??
-                '本地 release 已提交，navigation 可以从 Cache Storage 启动。',
+              ...(progress ? { revalidationProgress: progress } : undefined),
+              message: warning ?? '本地 release 已提交，navigation 可以从 Cache Storage 启动。',
             }
           : {
-              phase: 'network-only',
-              controlled: true,
-              revalidating: false,
+              phase: 'network-only', controlled: true, revalidating: false,
               updateAvailable: false,
-              ...(revalidationProgress
-                ? { revalidationProgress }
-                : undefined),
+              ...(progress ? { revalidationProgress: progress } : undefined),
               message: 'Local Edge 已激活，但还没有可用 release。',
             },
     )
   }
 
-  // All kernel-observation reads run on one ordered chain so an older
-  // fetch can never overwrite a newer observation: startup reads,
-  // controller-change reads, response-driven pulls, and terminal-message
-  // pulls share the same serialization.
-  const enqueueSnapshotRead = (warning?: string) => {
-    settlePullChain = settlePullChain.then(() =>
-      publishSettledSnapshot(warning).catch(publishRuntimeError),
-    )
-    return settlePullChain
-  }
-
-  // A kernel settle broadcast (commit or failure) reaches every controlled
-  // window client, including the document whose own revalidate just settled.
-  // The pull must not relabel the running document: keep the loaded releaseId
-  // and only surface a kernel active release that differs from it as an
-  // available update. Settle publishes never touch the document-owned
-  // `revalidating` flag and re-read the current state after the await, so a
-  // revalidate() that started while the pull was in flight keeps its
-  // activity. A fetched running install is the freshest kernel observation
-  // and wins, never regressing below what the document already shows; a
-  // snapshot read that predates its release's settle does not resurrect
-  // the counts the terminal message already dropped. When the snapshot
-  // reports no install, the document's progress survives only when it
-  // was published while the fetch was in flight: the kernel registers an
-  // install before broadcasting it, so a live install that raced the
-  // fetch's read necessarily broadcasts after the fetch began, while
-  // progress that predates the fetch with an idle snapshot is provably
-  // stale. A document opened through an explicit network open
-  // (?__fwa=network) stays on the network baseline by contract and drops
-  // progress without pulling the kernel.
-  const publishSettledSnapshot = async (warning?: string) => {
-    if (explicitNetworkOpen) {
-      const { revalidationProgress: _dropped, ...rest } = state
-      void _dropped
-      publish(
-        warning === undefined
-          ? rest
-          : { ...rest, message: warning },
-      )
-      return
-    }
-    const startedAtSeq = kernelEventSeq
-    const progressSeqAtStart = progressEventSeq
-    const snapshot = await fetchKernelSnapshot()
-    if (!snapshot) {
-      publish({
-        phase: 'network-only',
-        controlled: false,
-        revalidating: false,
-        updateAvailable: false,
-        message:
-          warning ??
-          '页面尚未受 Local Edge 控制，继续使用 network baseline。',
-      })
-      return
-    }
-
-    // The settled release's progress is stale and must go; a live
-    // install that the snapshot missed broadcasts again and re-publishes
-    // itself, so dropping a pre-fetch value with an idle snapshot cannot
-    // lose live progress.
-    const currentProgress = state.revalidationProgress
-    const settledProgress =
-      snapshot.revalidation &&
-      !progressSettledDuringFetch(snapshot.revalidation, startedAtSeq)
-        ? snapshot.revalidation
-        : undefined
-    const mergedProgress = settledProgress
-      ? (!currentProgress ||
-          currentProgress.releaseId !== settledProgress.releaseId ||
-          currentProgress.completedAssets <= settledProgress.completedAssets)
-        ? settledProgress
-        : currentProgress
-      : progressEventSeq !== progressSeqAtStart
-        ? currentProgress
-        : undefined
-    const { revalidationProgress: _merged, ...restState } = state
-    void _merged
-    const publishSettled = (value: LocalEdgeClientState) => {
-      publish({
-        ...value,
-        ...(mergedProgress ? { revalidationProgress: mergedProgress } : undefined),
-      })
-    }
+  const publishSettledSnapshotValue = (
+    snapshot: LocalEdgeSnapshot,
+    progress?: LocalEdgeRevalidationProgress,
+    warning?: string,
+  ) => {
+    const { revalidationProgress: _previous, ...restState } = state
+    void _previous
+    const publishSettled = (value: LocalEdgeClientState) =>
+      publish({ ...value, ...(progress ? { revalidationProgress: progress } : undefined) })
 
     if (snapshot.mode !== 'active') {
       const { releaseId: _droppedReleaseId, ...restWithoutReleaseId } = restState
       void _droppedReleaseId
       publishSettled({
-        ...restWithoutReleaseId,
-        phase: 'network-only',
-        controlled: true,
-        updateAvailable: false,
-        availableReleaseId: undefined,
-        message:
-          warning ??
-          (snapshot.mode === 'disabled'
-            ? 'Local Edge 已由 release flag 禁用，当前使用 network baseline。'
-            : 'Local Edge 已激活，但还没有可用 release。'),
+        ...restWithoutReleaseId, phase: 'network-only', controlled: true,
+        updateAvailable: false, availableReleaseId: undefined,
+        message: warning ?? (snapshot.mode === 'disabled'
+          ? 'Local Edge 已由 release flag 禁用，当前使用 network baseline。'
+          : 'Local Edge 已激活，但还没有可用 release。'),
       })
       return
     }
     if (!snapshot.release) {
       publishSettled({
-        ...restState,
-        updateAvailable: false,
-        availableReleaseId: undefined,
+        ...restState, updateAvailable: false, availableReleaseId: undefined,
         message: warning ?? 'Local Edge 已激活，但还没有可用 release。',
       })
       return
     }
-
     const activeReleaseId = snapshot.release.releaseId
     if (!restState.releaseId) {
       publishSettled({
-        ...restState,
-        phase: 'ready',
-        controlled: true,
-        releaseId: activeReleaseId,
-        updateAvailable: false,
-        availableReleaseId: undefined,
-        message:
-          warning ?? '本地 release 已提交，navigation 可以从 Cache Storage 启动。',
+        ...restState, phase: 'ready', controlled: true, releaseId: activeReleaseId,
+        updateAvailable: false, availableReleaseId: undefined,
+        message: warning ?? '本地 release 已提交，navigation 可以从 Cache Storage 启动。',
       })
       return
     }
     if (restState.releaseId === activeReleaseId) {
-      // A successful pull proves the kernel still serves the loaded release:
-      // recover the phase for a document sitting in a transient error state.
       publishSettled({
-        ...restState,
-        phase: 'ready',
-        controlled: true,
-        updateAvailable: false,
-        availableReleaseId: undefined,
+        ...restState, phase: 'ready', controlled: true,
+        updateAvailable: false, availableReleaseId: undefined,
         ...(warning === undefined ? undefined : { message: warning }),
       })
       return
     }
-
     publishSettled({
-      ...restState,
-      phase: 'ready',
-      controlled: true,
-      availableReleaseId: activeReleaseId,
-      updateAvailable: true,
-      message:
-        warning ??
-        (restState.availableReleaseId === activeReleaseId &&
-        restState.updateAvailable
-          ? restState.message
-          : '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。'),
+      ...restState, phase: 'ready', controlled: true,
+      availableReleaseId: activeReleaseId, updateAvailable: true,
+      message: warning ?? (restState.availableReleaseId === activeReleaseId && restState.updateAvailable
+        ? restState.message
+        : '新 release 已完整缓存；当前会话继续运行原版本，下次打开或显式应用更新时启用。'),
     })
   }
 
-  const requestRevalidation = async () => {
+  const applySnapshotRead = (
+    read: Extract<KernelSnapshotRead, { kind: 'legacy' | 'ordered' }>,
+    projection: 'startup' | 'settled',
+    warning?: string,
+  ) => {
+    if (read.kind === 'legacy') {
+      orderedProgressEnabled = false
+      lastKernelMode = read.snapshot.mode
+      observationCursor = { phase: 'unknown' }
+      if (projection === 'startup') publishStartupSnapshot(read.snapshot, undefined, warning)
+      else publishSettledSnapshotValue(read.snapshot, undefined, warning)
+      return true
+    }
+    orderedProgressEnabled = true
+    const decision = reduceRevalidationObservation(observationCursor, {
+      kind: 'snapshot', identity: read.snapshot, progress: read.snapshot.revalidation,
+    })
+    if (!decision.accepted) return false
+    lastKernelMode = read.snapshot.mode
+    observationCursor = decision.cursor
+    const progress = cursorProgress()
+    if (projection === 'startup') publishStartupSnapshot(read.snapshot, progress, warning)
+    else publishSettledSnapshotValue(read.snapshot, progress, warning)
+    return true
+  }
+
+  const publishSettledSnapshot = async (warning?: string) => {
+    if (explicitNetworkOpen) {
+      const { revalidationProgress: _dropped, ...rest } = state
+      void _dropped
+      publish(warning === undefined ? rest : { ...rest, message: warning })
+      return
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const read = await fetchKernelSnapshot()
+      if (read.kind === 'stale-controller') continue
+      if (read.kind === 'uncontrolled') {
+        publish({
+          phase: 'network-only', controlled: false, revalidating: false,
+          updateAvailable: false,
+          message: warning ?? '页面尚未受 Local Edge 控制，继续使用 network baseline。',
+        })
+        return
+      }
+      if (read.kind === 'incompatible') throw new Error('active Service Worker does not expose the FWA kernel API')
+      if (read.kind === 'unavailable') throw read.error
+      if (applySnapshotRead(read, 'settled', warning)) return
+    }
+    throw new Error('FWA kernel observations did not converge')
+  }
+
+  const enqueueSnapshotRead = (warning?: string) => {
+    if (snapshotPullQueued) return settlePullChain
+    snapshotPullQueued = true
+    settlePullChain = settlePullChain.then(async () => {
+      snapshotPullQueued = false
+      try {
+        await publishSettledSnapshot(warning)
+      } catch (error) {
+        publishRuntimeError(error)
+      }
+    })
+    return settlePullChain
+  }
+
+  const requestRevalidation = async (): Promise<KernelRevalidationRead> => {
+    const controller = navigator.serviceWorker.controller
+    const generation = controllerGeneration
     try {
       const response = await fetch(controlPaths.revalidate, {
-        method: 'POST',
-        headers: { 'X-FWA-Control': 'revalidate' },
+        method: 'POST', headers: { 'X-FWA-Control': 'revalidate' },
       })
-      if (!response.ok) {
-        return undefined
+      if (generation !== controllerGeneration || controller !== navigator.serviceWorker.controller) {
+        return { kind: 'stale-controller' }
       }
-
-      return (await response.json()) as LocalEdgeRevalidationResult
+      if (!response.ok) return { kind: 'failed' }
+      const value: unknown = await response.json()
+      if (
+        generation !== controllerGeneration ||
+        controller !== navigator.serviceWorker.controller
+      ) {
+        return { kind: 'stale-controller' }
+      }
+      const protocolVersion = Number(response.headers.get(fwaKernelProtocolHeaderName))
+      const ordered =
+        response.headers.get(fwaKernelProbeHeaderName) === config.workerPath &&
+        Number.isSafeInteger(protocolVersion) &&
+        protocolVersion >= fwaOrderedProgressProtocolVersion
+      if (ordered || orderedProgressEnabled) {
+        return isOrderedRevalidationResult(value)
+          ? { kind: 'ordered', result: value }
+          : { kind: 'failed' }
+      }
+      return isLocalEdgeRevalidationResult(value)
+        ? { kind: 'legacy', result: value }
+        : { kind: 'failed' }
     } catch {
-      return undefined
+      return { kind: 'failed' }
     }
   }
 
+  const applyOrderedTerminalResult = (result: OrderedLocalEdgeRevalidationResult) => {
+    if (
+      result.attemptId === undefined || !result.release ||
+      (result.status !== 'installed' && result.status !== 'repaired' && result.status !== 'updated')
+    ) return
+    const decision = reduceRevalidationObservation(observationCursor, {
+      kind: 'terminal', identity: result,
+      attempt: { attemptId: result.attemptId, releaseId: result.release.releaseId },
+    })
+    if (decision.accepted) {
+      observationCursor = decision.cursor
+      publishCursorProgress()
+    } else {
+      void enqueueSnapshotRead()
+    }
+  }
+
+  const awaitAuthoritativePull = async () => {
+    let releasePull!: () => void
+    let pullFailed = false
+    settlePullChain = settlePullChain.then(async () => {
+      try {
+        await publishSettledSnapshot()
+      } catch (error) {
+        pullFailed = true
+        publishRuntimeError(error)
+      } finally {
+        releasePull()
+      }
+    })
+    await new Promise<void>((resolve) => { releasePull = resolve })
+    return !pullFailed
+  }
+
   const runRevalidation = async () => {
-    const result = await requestRevalidation()
-    if (!result) {
+    const read = await requestRevalidation()
+    if (read.kind === 'failed' || read.kind === 'stale-controller') {
       if (revalidationVisible) {
-        await enqueueSnapshotRead(
-          'Release revalidation failed; the last committed release remains active.',
-        )
+        await enqueueSnapshotRead('Release revalidation failed; the last committed release remains active.')
       } else if (state.revalidationProgress) {
-        // A lost terminal broadcast leaves stale progress with no later
-        // event to clear it; re-sync from the kernel on the next check.
         await enqueueSnapshotRead()
       }
       return 'failed' as const
     }
+    if (read.kind === 'ordered') {
+      applyOrderedTerminalResult(read.result)
+    }
+    const result = read.result
     if (result.status === 'updated') {
       const availableReleaseId = result.release?.releaseId
       if (availableReleaseId && availableReleaseId !== state.releaseId) {
-        // Announce from a fresh, ordered kernel observation rather than from
-        // the response payload: a commit that landed in another tab while
-        // this response was pending must not be overwritten by the older
-        // release this result carries. The public promise keeps its state
-        // semantics: the announcement is visible once await revalidate()
-        // resolves. The own install's progress baseline is dropped here,
-        // before the pull, so the pull keeps only newer attempts' progress.
-        if (state.revalidationProgress?.releaseId === availableReleaseId) {
-          publish({ ...state, revalidationProgress: undefined })
-        }
-        let releasePull!: () => void
-        let pullFailed = false
-        settlePullChain = settlePullChain.then(async () => {
-          try {
-            await publishSettledSnapshot()
-          } catch (error) {
-            pullFailed = true
-            publishRuntimeError(error)
-          } finally {
-            releasePull()
-          }
-        })
-        await new Promise<void>((resolve) => {
-          releasePull = resolve
-        })
-        // The guarantee is "the announcement is visible once await
-        // revalidate() resolves": when the ordered pull failed, nothing
-        // can be announced yet, so the call reports failure instead and
-        // callers do not try to apply an update they cannot see.
-        if (pullFailed) {
-          return 'failed' as const
-        }
-        return 'updated' as const
+        if (!(await awaitAuthoritativePull())) return 'failed' as const
+        return state.updateAvailable ? ('updated' as const) : ('current' as const)
       }
     }
     if (result.status === 'disabled') {
-      if (revalidationVisible) {
-        window.location.reload()
-      }
+      if (!(await awaitAuthoritativePull())) return 'failed' as const
+      if (lastKernelMode !== 'disabled') return 'current' as const
+      if (revalidationVisible) window.location.reload()
       return 'disabled' as const
     }
     if (
       !revalidationVisible &&
-      (result.status === 'installed' ||
-        result.status === 'enabled' ||
-        result.status === 'repaired') &&
+      (result.status === 'installed' || result.status === 'enabled' || result.status === 'repaired') &&
       result.release
     ) {
-      // The first-install claim comes from an ordered fresh snapshot read,
-      // not from the response payload: a cross-tab commit that landed while
-      // this response was pending must not be overwritten by the older
-      // release the result carries. A silent repair settles the same way:
-      // its progress must clear even when the best-effort terminal
-      // broadcast is lost.
       await enqueueSnapshotRead()
     } else if (result.status !== 'current' && revalidationVisible) {
       await enqueueSnapshotRead()
     } else if (result.status === 'current' && state.revalidationProgress) {
-      // 'current' proves no install was in flight at response time: stale
-      // progress (a lost terminal broadcast) re-syncs from the kernel; a
-      // cross-tab install's live progress re-publishes unchanged.
       await enqueueSnapshotRead()
     }
-    return result.status === 'disabled-current'
-      ? ('disabled' as const)
-      : ('current' as const)
+    return result.status === 'disabled-current' ? ('disabled' as const) : ('current' as const)
   }
 
   const showRevalidationActivity = () => {
@@ -560,9 +538,12 @@ export function createLocalEdgeDocumentRuntime(
   }
 
   const publishRuntimeError = (error: unknown) => {
+    if (stopped) {
+      return
+    }
     publish({
       phase: 'error',
-      controlled: Boolean(navigator.serviceWorker.controller),
+      controlled: Boolean(navigator.serviceWorker?.controller),
       revalidating: false,
       updateAvailable: false,
       message:
@@ -587,7 +568,7 @@ export function createLocalEdgeDocumentRuntime(
       explicitNetworkOpen = true
       publish({
         phase: 'network-only',
-        controlled: Boolean(navigator.serviceWorker.controller),
+        controlled: Boolean(navigator.serviceWorker?.controller),
         revalidating: false,
         updateAvailable: false,
         message: '当前页面经显式 network open 进入，不重新注册 Local Edge。',
@@ -600,23 +581,15 @@ export function createLocalEdgeDocumentRuntime(
     }
 
     if (navigator.serviceWorker.controller) {
-      // The startup read runs as the first task on the ordered observation
-      // chain: a commit that lands while this read is in flight enqueues
-      // its terminal pull behind it, so the older startup snapshot can
-      // never overwrite a newer observation.
       let snapshotPublished = false
       let startupError: unknown
       await (settlePullChain = settlePullChain.then(async () => {
         try {
-          let snapshot: LocalEdgeSnapshot | undefined
-          const startedAtSeq = kernelEventSeq
-          try {
-            snapshot = await fetchKernelSnapshot()
-          } catch {
-            snapshot = undefined
+          let read = await fetchKernelSnapshot()
+          if (read.kind === 'stale-controller') {
+            read = await fetchKernelSnapshot()
           }
-
-          if (!snapshot) {
+          if (read.kind === 'incompatible') {
             if (takeoverWasAttempted(config.workerPath)) {
               throw new Error(
                 'FWA kernel API is still unavailable after Service Worker takeover',
@@ -636,10 +609,23 @@ export function createLocalEdgeDocumentRuntime(
             window.location.reload()
             return
           }
-
+          if (read.kind === 'unavailable') {
+            throw read.error
+          }
+          if (read.kind === 'uncontrolled' || read.kind === 'stale-controller') {
+            throw new Error('Service Worker controller changed during startup')
+          }
           clearTakeoverAttempt(config.workerPath)
-          publishSnapshot(snapshot, startedAtSeq)
-          snapshotPublished = true
+          snapshotPublished = applySnapshotRead(read, 'startup')
+          if (!snapshotPublished) {
+            const fresh = await fetchKernelSnapshot()
+            if (fresh.kind === 'legacy' || fresh.kind === 'ordered') {
+              snapshotPublished = applySnapshotRead(fresh, 'startup')
+            }
+          }
+          if (!snapshotPublished) {
+            throw new Error('FWA kernel observations did not converge')
+          }
         } catch (error) {
           startupError = error
         }
@@ -648,7 +634,6 @@ export function createLocalEdgeDocumentRuntime(
         throw startupError
       }
       if (!snapshotPublished) {
-        // Takeover reload in progress; startup does not continue.
         return
       }
     } else {
@@ -670,23 +655,19 @@ export function createLocalEdgeDocumentRuntime(
   }
 
   const handleControllerChange = () => {
+    controllerGeneration += 1
+    observationCursor = { phase: 'unknown' }
+    orderedProgressEnabled = false
+    lastKernelMode = undefined
+    const { revalidationProgress: _dropped, ...rest } = state
+    void _dropped
+    publish(rest)
     void enqueueSnapshotRead()
   }
 
   const handleKernelMessage = (event: MessageEvent) => {
-    const source = event.source
-    if (!source || typeof source !== 'object') {
-      return
-    }
-    const sourceScriptUrl = (source as { scriptURL?: unknown }).scriptURL
-    if (
-      typeof sourceScriptUrl !== 'string' ||
-      new URL(sourceScriptUrl).pathname !== config.workerPath
-    ) {
-      return
-    }
     const controller = navigator.serviceWorker?.controller
-    if (controller && controller.scriptURL !== sourceScriptUrl) {
+    if (!controller || event.source !== controller || explicitNetworkOpen) {
       return
     }
     if (typeof event.data !== 'object' || event.data === null) {
@@ -695,54 +676,48 @@ export function createLocalEdgeDocumentRuntime(
 
     const payload = event.data as Record<string, unknown>
     if (payload.type === fwaRevalidationProgressMessageType) {
-      const progress = revalidationProgressFromMessage(payload)
-      if (!progress) {
+      if (!isKernelRevalidationProgress(payload)) {
+        void enqueueSnapshotRead()
         return
       }
-      const current = state.revalidationProgress
-      if (
-        current?.releaseId === progress.releaseId &&
-        current.completedAssets > progress.completedAssets
-      ) {
-        // An out-of-order broadcast must not regress the visible count.
-        return
-      }
-      publish({
-        ...state,
-        revalidationProgress: progress,
+      const decision = reduceRevalidationObservation(observationCursor, {
+        kind: 'progress',
+        identity: payload,
+        attempt: {
+          attemptId: payload.attemptId,
+          releaseId: payload.releaseId,
+          totalAssets: payload.totalAssets,
+        },
+        completedAssets: payload.completedAssets,
       })
-      progressEventSeq += 1
+      if (!decision.accepted) {
+        void enqueueSnapshotRead()
+        return
+      }
+      orderedProgressEnabled = true
+      observationCursor = decision.cursor
+      publishCursorProgress()
       return
     }
     if (
       payload.type === fwaRevalidationCommittedMessageType ||
       payload.type === fwaRevalidationFailedMessageType
     ) {
-      const settledReleaseId =
-        typeof payload.releaseId === 'string' ? payload.releaseId : undefined
-      // A retry or repair of the same release restarts from zero: drop the
-      // settled attempt's baseline synchronously, before the ordered pull
-      // runs, so the monotonic guard does not reject the retry's early
-      // counts while the pull is still pending. The settle is also marked
-      // with the current sequence number so in-flight snapshot reads cannot
-      // resurrect this attempt's counts after they were dropped.
-      kernelEventSeq += 1
-      if (settledReleaseId) {
-        settledAtSeq.set(settledReleaseId, kernelEventSeq)
+      const terminal = terminalObservationFromMessage(payload)
+      if (!terminal) {
+        void enqueueSnapshotRead()
+        return
       }
-      if (
-        settledReleaseId &&
-        state.revalidationProgress?.releaseId === settledReleaseId
-      ) {
-        publish({ ...state, revalidationProgress: undefined })
-      }
-      // Terminal pulls are serialized: an earlier settle response can never
-      // overwrite the result of a later terminal message. A successful idle
-      // snapshot clears progress that predates its fetch; progress arriving
-      // while the fetch is in flight survives as newer evidence.
-      settlePullChain = settlePullChain.then(() =>
-        publishSettledSnapshot().catch(publishRuntimeError),
+      const decision = reduceRevalidationObservation(
+        observationCursor,
+        terminal,
       )
+      if (decision.accepted) {
+        orderedProgressEnabled = true
+        observationCursor = decision.cursor
+        publishCursorProgress()
+      }
+      void enqueueSnapshotRead()
     }
   }
 
@@ -876,25 +851,50 @@ function isLocalEdgeSnapshot(value: unknown): value is LocalEdgeSnapshot {
   )
 }
 
-function revalidationProgressFromMessage(
+function terminalObservationFromMessage(
   payload: Record<string, unknown>,
-): LocalEdgeRevalidationProgress | undefined {
-  const { releaseId, completedAssets, totalAssets } = payload
+): Extract<RevalidationObservation, { kind: 'terminal' }> | undefined {
   if (
-    typeof releaseId !== 'string' ||
-    !Number.isSafeInteger(completedAssets) ||
-    !Number.isSafeInteger(totalAssets) ||
-    (completedAssets as number) < 0 ||
-    (totalAssets as number) < 1 ||
-    (completedAssets as number) > (totalAssets as number)
+    !isKernelObservationIdentity(payload) ||
+    !Number.isSafeInteger(payload.attemptId) ||
+    (payload.attemptId as number) < 1 ||
+    (payload.attemptId as number) > payload.observationRevision ||
+    typeof payload.releaseId !== 'string' ||
+    payload.releaseId.length === 0
   ) {
     return undefined
   }
   return {
-    releaseId,
-    completedAssets: completedAssets as number,
-    totalAssets: totalAssets as number,
+    kind: 'terminal',
+    identity: payload,
+    attempt: {
+      attemptId: payload.attemptId as number,
+      releaseId: payload.releaseId,
+    },
   }
+}
+
+function isLocalEdgeRevalidationResult(
+  value: unknown,
+): value is LocalEdgeRevalidationResult {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const result = value as Record<string, unknown>
+  return (
+    typeof result.localEdgeEnabled === 'boolean' &&
+    (result.status === 'current' ||
+      result.status === 'disabled' ||
+      result.status === 'disabled-current' ||
+      result.status === 'enabled' ||
+      result.status === 'installed' ||
+      result.status === 'repaired' ||
+      result.status === 'updated') &&
+    (result.release === undefined ||
+      (typeof result.release === 'object' &&
+        result.release !== null &&
+        typeof (result.release as { releaseId?: unknown }).releaseId === 'string'))
+  )
 }
 
 function normalizeUpdateCheck(

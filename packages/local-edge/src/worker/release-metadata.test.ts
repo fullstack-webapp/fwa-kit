@@ -2,7 +2,9 @@ import { IDBFactory } from 'fake-indexeddb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LegacyAppRelease } from '../release.ts'
 import {
-  claimCandidateJournal,
+  allocateReleaseObservation,
+  applyLocalEdgeModeIfLatest,
+  claimCandidateJournalIfLatest,
   deleteReleaseMetadata,
   normalizeStoredReleaseState,
   readClientReleasePins,
@@ -94,22 +96,92 @@ describe('release metadata authority', () => {
     await expect(readLocalEdgeEnabled(newEpoch)).resolves.toBe(true)
   })
 
+  it('orders descriptor transitions independently of lock acquisition order', async () => {
+    const metadataEpoch = await readOrCreateMetadataEpoch(true)
+    const older = await allocateReleaseObservation(metadataEpoch)
+    const newer = await allocateReleaseObservation(metadataEpoch)
+
+    await expect(
+      applyLocalEdgeModeIfLatest(older, true),
+    ).resolves.toMatchObject({ applied: false })
+
+    await expect(
+      claimCandidateJournalIfLatest(
+        {
+          metadataEpoch,
+          kernelInstanceId: '00000000-0000-4000-8000-000000000020',
+          attemptId: 3,
+          releaseId: releases[2].releaseId,
+          releaseObservationSeq: older.observationSeq,
+          phase: 'installing',
+        },
+        older,
+      ),
+    ).resolves.toMatchObject({ claimed: false })
+
+    await expect(
+      applyLocalEdgeModeIfLatest(newer, false),
+    ).resolves.toMatchObject({ applied: true })
+    await expect(readLocalEdgeEnabled(metadataEpoch)).resolves.toBe(false)
+  })
+
+  it('rejects a candidate commit after a newer descriptor request is issued', async () => {
+    const metadataEpoch = await readOrCreateMetadataEpoch(true)
+    const observation = await allocateReleaseObservation(metadataEpoch)
+    const owner = {
+      metadataEpoch,
+      kernelInstanceId: '00000000-0000-4000-8000-000000000021',
+      attemptId: 4,
+      releaseId: releases[1].releaseId,
+      releaseObservationSeq: observation.observationSeq,
+    }
+    await expect(
+      claimCandidateJournalIfLatest(
+        { ...owner, phase: 'installing' },
+        observation,
+      ),
+    ).resolves.toMatchObject({ claimed: true })
+
+    await allocateReleaseObservation(metadataEpoch)
+
+    await expect(
+      writeReleaseStateForCandidate(owner, {
+        active: releases[1],
+        retained: [],
+      }),
+    ).rejects.toThrow('candidate install lost metadata authority')
+    await expect(readReleaseState(metadataEpoch)).resolves.toEqual({
+      active: undefined,
+      retained: [],
+    })
+  })
+
   it('rejects a superseded candidate owner in the commit transaction', async () => {
     const metadataEpoch = await readOrCreateMetadataEpoch(true)
+    const firstObservation = await allocateReleaseObservation(metadataEpoch)
     const firstOwner = {
       metadataEpoch,
       kernelInstanceId: '00000000-0000-4000-8000-000000000010',
       attemptId: 1,
       releaseId: releases[0].releaseId,
+      releaseObservationSeq: firstObservation.observationSeq,
     }
+    await claimCandidateJournalIfLatest(
+      { ...firstOwner, phase: 'installing' },
+      firstObservation,
+    )
+    const secondObservation = await allocateReleaseObservation(metadataEpoch)
     const secondOwner = {
       metadataEpoch,
       kernelInstanceId: '00000000-0000-4000-8000-000000000011',
       attemptId: 2,
       releaseId: releases[1].releaseId,
+      releaseObservationSeq: secondObservation.observationSeq,
     }
-    await claimCandidateJournal({ ...firstOwner, phase: 'installing' })
-    await claimCandidateJournal({ ...secondOwner, phase: 'installing' })
+    await claimCandidateJournalIfLatest(
+      { ...secondOwner, phase: 'installing' },
+      secondObservation,
+    )
 
     await expect(
       writeReleaseStateForCandidate(firstOwner, {

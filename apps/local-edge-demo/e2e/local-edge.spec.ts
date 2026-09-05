@@ -2190,6 +2190,17 @@ test.describe('Local Edge v0', () => {
         'ready',
         { timeout: 20_000 },
       )
+      // `ready` can precede the loader's startup revalidation settling. Drain
+      // that shared kernel request so the explicit update below cannot merely
+      // join an older descriptor observation.
+      expect(
+        await activePage.evaluate(() =>
+          fetch('/__fwa/revalidate', {
+            method: 'POST',
+            headers: { 'X-FWA-Control': 'revalidate' },
+          }).then((response) => response.json()),
+        ),
+      ).toMatchObject({ status: 'current' })
 
       await activePage.evaluate(() =>
         fetch('/__test/switch-release', { method: 'POST' }),
@@ -2204,26 +2215,25 @@ test.describe('Local Edge v0', () => {
       await expect(
         activePage.locator('meta[name="fwa-test-release"]'),
       ).toHaveAttribute('content', 'app-update', { timeout: 20_000 })
+      expect(
+        await activePage.evaluate(() =>
+          fetch('/__fwa/revalidate', {
+            method: 'POST',
+            headers: { 'X-FWA-Control': 'revalidate' },
+          }).then((response) => response.json()),
+        ),
+      ).toMatchObject({ status: 'current' })
 
       await activePage.evaluate(() =>
         fetch('/__test/switch-third-release', { method: 'POST' }),
       )
-      const updateResponse = activePage.waitForResponse(
-        (response) =>
-          new URL(response.url()).pathname === '/__fwa/revalidate',
-      )
-      await activePage.evaluate(() => {
+      const updateResult = await activePage.evaluate(() => {
         const testWindow = window as typeof window & {
-          __fwa?: { localEdge?: { revalidate(): Promise<void> } }
+          __fwa?: { localEdge?: { revalidate(): Promise<string> } }
         }
         return testWindow.__fwa?.localEdge?.revalidate()
       })
-      const update = await updateResponse
-      expect(update.status()).toBe(200)
-      expect(await update.json()).toMatchObject({
-        status: 'updated',
-        release: { releaseId: releaseServer.thirdReleaseId },
-      })
+      expect(updateResult).toBe('updated')
       expect(
         await activePage.evaluate(() => {
           const testWindow = window as typeof window & {
@@ -2323,6 +2333,108 @@ test.describe('Local Edge v0', () => {
         )
         .toEqual({ retainedReleaseCount: 0, oldCachesRemain: false })
     } finally {
+      await context.close()
+      await releaseServer.close()
+    }
+  })
+
+  test('rejects a superseded candidate commit without clearing the replacement owner', async ({
+    browser,
+  }) => {
+    const releaseServer = await startReleaseUpdateServer({
+      candidateFault: 'slow-asset',
+    })
+    const context = await browser.newContext()
+    const page = await context.newPage()
+
+    try {
+      await page.goto(releaseServer.baseUrl)
+      await expect(page.locator('[data-local-edge-status]')).toHaveAttribute(
+        'data-local-edge-status',
+        'ready',
+        { timeout: 20_000 },
+      )
+      await page.evaluate(() =>
+        fetch('/__test/switch-release', { method: 'POST' }),
+      )
+      const revalidation = page.evaluate(() =>
+        fetch('/__fwa/revalidate', {
+          method: 'POST',
+          headers: { 'X-FWA-Control': 'revalidate' },
+        }).then(async (response) => ({
+          body: await response.json(),
+          status: response.status,
+        })),
+      )
+
+      await releaseServer.waitForCandidateAssetRequest()
+      const replacementInstance = '00000000-0000-4000-8000-000000000099'
+      await page.evaluate(
+        async ({ releaseId, replacementInstance }) => {
+          const database = await new Promise<IDBDatabase>((resolve, reject) => {
+            const request = indexedDB.open(
+              'fwa-local-edge:fwa-local-edge-demo',
+              1,
+            )
+            request.onsuccess = () => resolve(request.result)
+            request.onerror = () => reject(request.error)
+          })
+          await new Promise<void>((resolve, reject) => {
+            const transaction = database.transaction('metadata', 'readwrite')
+            const store = transaction.objectStore('metadata')
+            const epochRequest = store.get('metadataEpoch')
+            epochRequest.onsuccess = () => {
+              store.put(
+                {
+                  metadataEpoch: epochRequest.result,
+                  kernelInstanceId: replacementInstance,
+                  attemptId: 999,
+                  releaseId,
+                  phase: 'installing',
+                },
+                'candidateJournal',
+              )
+            }
+            transaction.oncomplete = () => resolve()
+            transaction.onerror = () => reject(transaction.error)
+          })
+          database.close()
+
+          const cache = await caches.open(
+            `fwa-local-edge:fwa-local-edge-demo:release:${releaseId}`,
+          )
+          await cache.put('/replacement-owner-marker', new Response('owned'))
+        },
+        {
+          releaseId: releaseServer.updatedReleaseId,
+          replacementInstance,
+        },
+      )
+      releaseServer.releaseCandidateAsset()
+
+      await expect(revalidation).resolves.toMatchObject({ status: 503 })
+      const durableState = await page.evaluate(async (releaseId) => {
+        const snapshot = await fetch('/__fwa/state').then((response) =>
+          response.json(),
+        )
+        const marker = await caches
+          .open(`fwa-local-edge:fwa-local-edge-demo:release:${releaseId}`)
+          .then((cache) => cache.match('/replacement-owner-marker'))
+        return { marker: await marker?.text(), snapshot }
+      }, releaseServer.updatedReleaseId)
+      expect(durableState).toMatchObject({
+        marker: 'owned',
+        snapshot: {
+          release: { releaseId: releaseServer.initialReleaseId },
+        },
+      })
+      expect(await readCandidateJournal(page)).toMatchObject({
+        attemptId: 999,
+        kernelInstanceId: replacementInstance,
+        releaseId: releaseServer.updatedReleaseId,
+      })
+    } finally {
+      releaseServer.releaseCandidateAsset()
       await context.close()
       await releaseServer.close()
     }

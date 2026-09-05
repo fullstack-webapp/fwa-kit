@@ -51,8 +51,12 @@ vi.mock('./release-verifier.ts', () => ({
 }))
 
 vi.mock('./release-metadata.ts', () => ({
-  readCandidateJournal: vi.fn(async () => undefined),
-  claimCandidateJournal: vi.fn(async () => undefined),
+  allocateReleaseObservation: vi.fn(async () => ({
+    metadataEpoch: 'metadata-epoch-test',
+    observationSeq: 1,
+  })),
+  applyLocalEdgeModeIfLatest: vi.fn(async () => ({ applied: true })),
+  claimCandidateJournalIfLatest: vi.fn(async () => ({ claimed: true })),
   clearCandidateJournalIfOwned: vi.fn(async () => true),
   markCandidateJournalCleaningIfOwned: vi.fn(async () => true),
   readOrCreateMetadataEpoch: vi.fn(async () => 'metadata-epoch-test'),
@@ -65,7 +69,6 @@ vi.mock('./release-metadata.ts', () => ({
   updateClientReleasePin: vi.fn(async () => new Map()),
   pruneClientReleasePins: vi.fn(async () => new Map()),
   readLocalEdgeEnabled: vi.fn(async () => true),
-  writeLocalEdgeEnabled: vi.fn(async () => undefined),
   writeReleaseStateForCandidate: vi.fn(async () => undefined),
   writeRetainedReleasesIfActive: vi.fn(async () => true),
   writeCandidateJournalIfOwned: vi.fn(async () => true),
@@ -288,6 +291,39 @@ describe('release-runtime candidate install progress', () => {
     ).toBe(false)
   })
 
+  it('releases the cache lock while physical metadata deletion is blocked', async () => {
+    const metadata = await import('./release-metadata.ts')
+    let finishDeletion!: () => void
+    let lockHeld = false
+    const deletion = new Promise<void>((resolve) => {
+      finishDeletion = resolve
+    })
+    vi.mocked(metadata.deleteReleaseMetadata).mockClear()
+    vi.mocked(metadata.deleteReleaseMetadata).mockReturnValueOnce(deletion)
+    const requestLock = navigator.locks.request as unknown as ReturnType<
+      typeof vi.fn
+    >
+    requestLock.mockImplementation(
+      async (_name: string, callback: (lock: Lock) => Promise<unknown>) => {
+        lockHeld = true
+        try {
+          return await callback({} as Lock)
+        } finally {
+          lockHeld = false
+        }
+      },
+    )
+
+    const reset = runtime.resetReleaseRuntime()
+    await vi.waitFor(() =>
+      expect(metadata.deleteReleaseMetadata).toHaveBeenCalled(),
+    )
+    expect(lockHeld).toBe(false)
+
+    finishDeletion()
+    await expect(reset).resolves.toBeUndefined()
+  })
+
   it('answers post-reset snapshots from memory without touching metadata', async () => {
     const metadata = await import('./release-metadata.ts')
     await runtime.revalidateReleaseForClient('window-1')
@@ -376,8 +412,9 @@ describe('release-runtime candidate install progress', () => {
     )
   })
 
-  it('holds descriptor observation and its mode transition under one lock', async () => {
+  it('does not hold the cache lock while waiting for the descriptor', async () => {
     const metadata = await import('./release-metadata.ts')
+    const verifier = await import('./release-verifier.ts')
     let releaseDescriptor!: () => void
     let lockHeld = false
     verifierState.descriptor = { localEdgeEnabled: false }
@@ -397,18 +434,50 @@ describe('release-runtime candidate install progress', () => {
         }
       },
     )
-    vi.mocked(metadata.writeLocalEdgeEnabled).mockImplementationOnce(
+    vi.mocked(metadata.applyLocalEdgeModeIfLatest).mockImplementationOnce(
       async () => {
         expect(lockHeld).toBe(true)
+        return { applied: true }
       },
     )
 
     const revalidation = runtime.revalidateReleaseForClient('window-1')
-    await vi.waitFor(() => expect(lockHeld).toBe(true))
+    await vi.waitFor(() =>
+      expect(verifier.fetchVerifiedReleaseDescriptor).toHaveBeenCalled(),
+    )
+    expect(lockHeld).toBe(false)
+    await expect(
+      runtime.pinRequestClient(
+        {
+          clientId: '',
+          resultingClientId: 'window-2',
+        } as FetchEvent,
+        '0123456789abcdef',
+      ),
+    ).resolves.toBeUndefined()
+    expect(metadata.updateClientReleasePin).toHaveBeenCalledWith(
+      'metadata-epoch-test',
+      'window-2',
+      '0123456789abcdef',
+    )
     releaseDescriptor()
 
     await expect(revalidation).resolves.toMatchObject({ status: 'disabled' })
     expect(lockHeld).toBe(false)
+  })
+
+  it('does not prune retained state before a stale descriptor is rejected', async () => {
+    const metadata = await import('./release-metadata.ts')
+    vi.mocked(metadata.pruneClientReleasePins).mockClear()
+    vi.mocked(metadata.claimCandidateJournalIfLatest).mockResolvedValueOnce({
+      claimed: false,
+    })
+
+    await expect(
+      runtime.revalidateReleaseForClient('window-1'),
+    ).resolves.toMatchObject({ status: 'current' })
+
+    expect(metadata.pruneClientReleasePins).not.toHaveBeenCalled()
   })
 
   it('revokes an in-flight candidate owner before publishing disabled mode', async () => {
@@ -418,10 +487,15 @@ describe('release-runtime candidate install progress', () => {
       kernelInstanceId: '00000000-0000-4000-8000-000000000099',
       attemptId: 7,
       releaseId: 'fedcba9876543210',
+      releaseObservationSeq: 1,
       phase: 'installing' as const,
     }
     verifierState.descriptor = { localEdgeEnabled: false }
-    vi.mocked(metadata.readCandidateJournal).mockResolvedValueOnce(previousOwner)
+    vi.mocked(metadata.clearCandidateJournalIfOwned).mockClear()
+    vi.mocked(metadata.applyLocalEdgeModeIfLatest).mockResolvedValueOnce({
+      applied: true,
+      previousCandidate: previousOwner,
+    })
 
     const result = await runtime.revalidateReleaseForClient('window-1')
 
@@ -429,14 +503,11 @@ describe('release-runtime candidate install progress', () => {
       status: 'disabled',
       localEdgeEnabled: false,
     })
-    expect(metadata.claimCandidateJournal).toHaveBeenCalledWith(
-      expect.objectContaining({
-        metadataEpoch: 'metadata-epoch-test',
-        releaseId: previousOwner.releaseId,
-        phase: 'cleaning',
-      }),
+    expect(metadata.applyLocalEdgeModeIfLatest).toHaveBeenCalledWith(
+      expect.objectContaining({ metadataEpoch: 'metadata-epoch-test' }),
+      false,
     )
-    expect(metadata.clearCandidateJournalIfOwned).toHaveBeenCalled()
+    expect(metadata.clearCandidateJournalIfOwned).not.toHaveBeenCalled()
     expect(caches.delete).toHaveBeenCalledWith(
       `fwa-local-edge:local-edge-package-test:release:${previousOwner.releaseId}`,
     )
