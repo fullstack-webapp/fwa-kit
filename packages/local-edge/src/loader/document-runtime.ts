@@ -322,6 +322,14 @@ export function createLocalEdgeDocumentRuntime(
     return true
   }
 
+  const isOrderedSnapshotOlderThanCursor = (
+    read: Extract<KernelSnapshotRead, { kind: 'legacy' | 'ordered' }>,
+  ) =>
+    read.kind === 'ordered' &&
+    observationCursor.phase !== 'unknown' &&
+    read.snapshot.kernelInstanceId === observationCursor.kernelInstanceId &&
+    read.snapshot.observationRevision < observationCursor.observationRevision
+
   const publishSettledSnapshot = async (warning?: string) => {
     if (explicitNetworkOpen) {
       const { revalidationProgress: _dropped, ...rest } = state
@@ -621,11 +629,22 @@ export function createLocalEdgeDocumentRuntime(
           }
           clearTakeoverAttempt(config.workerPath)
           snapshotPublished = applySnapshotRead(read, 'startup')
+          let startupReadWasOvertaken =
+            !snapshotPublished && isOrderedSnapshotOlderThanCursor(read)
           if (!snapshotPublished) {
             const fresh = await fetchKernelSnapshot()
+            startupReadWasOvertaken = false
             if (fresh.kind === 'legacy' || fresh.kind === 'ordered') {
               snapshotPublished = applySnapshotRead(fresh, 'startup')
+              startupReadWasOvertaken =
+                !snapshotPublished && isOrderedSnapshotOlderThanCursor(fresh)
             }
+          }
+          if (!snapshotPublished && startupReadWasOvertaken) {
+            // A current-controller message already supplied a newer kernel
+            // observation. Continue startup so revalidation and scheduling can
+            // recover the release projection without a finite retry race.
+            snapshotPublished = true
           }
           if (!snapshotPublished) {
             throw new Error('FWA kernel observations did not converge')

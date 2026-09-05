@@ -1198,6 +1198,69 @@ describe('createLocalEdgeDocumentRuntime', () => {
       )
     })
 
+    it('continues startup when two snapshots are overtaken by progress', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let stateCallCount = 0
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            if (stateCallCount <= 2) {
+              serviceWorker.dispatchEvent(
+                kernelMessage(
+                  {
+                    type: fwaRevalidationProgressMessageType,
+                    releaseId: 'release-b',
+                    completedAssets: stateCallCount,
+                    totalAssets: 4,
+                  },
+                  controllerSource(serviceWorker),
+                ),
+              )
+              return orderedKernelSnapshot(
+                {
+                  localEdgeEnabled: true,
+                  mode: 'active',
+                  release: { releaseId: 'release-a' },
+                },
+                0,
+              )
+            }
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              100,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: 'release-a' },
+                status: 'current',
+              },
+              99,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+
+      await settle(runtime)
+
+      expect(runtime.getState()).toMatchObject({
+        phase: 'ready',
+        releaseId: 'release-a',
+      })
+      expect(fakeScheduler.intervalCount()).toBe(1)
+    })
+
     it('publishes revalidationProgress from the kernel snapshot when a pull sees an install', async () => {
       const { runtime } = createControlledKernel({
         snapshotRevalidation: {
