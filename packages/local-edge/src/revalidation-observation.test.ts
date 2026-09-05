@@ -145,13 +145,16 @@ describe('reduceRevalidationObservation', () => {
     const running = apply({ phase: 'unknown' }, progress(7, 7))
     const settled = apply(running.cursor, terminal(8))
 
-    expect(apply(settled.cursor, progress(7, 8)).accepted).toBe(false)
+    expect(apply(settled.cursor, progress(7, 8))).toMatchObject({
+      accepted: false,
+      rejection: 'superseded',
+    })
     expect(
       apply(
         settled.cursor,
         snapshot(7, { running: true, completedAssets: 7 }),
-      ).accepted,
-    ).toBe(false)
+      ),
+    ).toMatchObject({ accepted: false, rejection: 'superseded' })
     expect(settled.cursor.phase).toBe('settled')
   })
 
@@ -161,7 +164,7 @@ describe('reduceRevalidationObservation', () => {
 
     expect(regressed).toMatchObject({
       accepted: false,
-      protocolConflict: true,
+      rejection: 'conflict',
     })
     expect(regressed.cursor).toEqual(running.cursor)
   })
@@ -184,7 +187,7 @@ describe('reduceRevalidationObservation', () => {
     expect(enriched).toMatchObject({
       accepted: true,
       applySnapshot: true,
-      protocolConflict: false,
+      rejection: undefined,
     })
   })
 
@@ -198,7 +201,7 @@ describe('reduceRevalidationObservation', () => {
     expect(enriched).toMatchObject({
       accepted: true,
       applySnapshot: true,
-      protocolConflict: false,
+      rejection: undefined,
     })
   })
 
@@ -208,14 +211,14 @@ describe('reduceRevalidationObservation', () => {
 
     expect(apply(running.cursor, snapshot(7))).toMatchObject({
       accepted: false,
-      protocolConflict: true,
+      rejection: 'conflict',
     })
     expect(
       apply(
         settled.cursor,
         snapshot(7, { running: true, completedAssets: 4 }),
       ),
-    ).toMatchObject({ accepted: false, protocolConflict: true })
+    ).toMatchObject({ accepted: false, rejection: 'conflict' })
   })
 
   it('rejects immutable attempt identity conflicts', () => {
@@ -230,13 +233,13 @@ describe('reduceRevalidationObservation', () => {
           completedAssets: 4,
         }),
       ),
-    ).toMatchObject({ accepted: false, protocolConflict: true })
+    ).toMatchObject({ accepted: false, rejection: 'conflict' })
     expect(
       apply(
         running.cursor,
         progress(7, 4, { totalAssets: 13 }),
       ),
-    ).toMatchObject({ accepted: false, protocolConflict: true })
+    ).toMatchObject({ accepted: false, rejection: 'conflict' })
   })
 
   it('does not let a message switch an established kernel instance', () => {
@@ -248,7 +251,7 @@ describe('reduceRevalidationObservation', () => {
 
     expect(mismatched).toMatchObject({
       accepted: false,
-      protocolConflict: false,
+      rejection: 'foreign-instance',
     })
     expect(mismatched.cursor).toEqual(running.cursor)
   })
@@ -277,7 +280,7 @@ describe('reduceRevalidationObservation', () => {
     const idle = apply({ phase: 'unknown' }, snapshot(8))
     const settled = apply(idle.cursor, terminal(8))
 
-    expect(settled).toMatchObject({ accepted: true, protocolConflict: false })
+    expect(settled).toMatchObject({ accepted: true, rejection: undefined })
     expect(settled.cursor).toMatchObject({
       phase: 'settled',
       attempt: { attemptId: 1, releaseId: 'release-a' },

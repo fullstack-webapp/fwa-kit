@@ -65,6 +65,7 @@ let revalidationAbortController: AbortController | undefined
 let revalidationInstall: ObservedRevalidationInstall | undefined
 let pendingProgressSends: Promise<unknown>[] = []
 let resetInFlight: Promise<void> | undefined
+let resetObservationReady: Promise<void> | undefined
 let resetStarted = false
 let metadataEpoch: string | undefined
 const candidateCacheLockName = `fwa-local-edge:${localEdgeConfig.appId}:candidate-cache`
@@ -99,22 +100,40 @@ export async function revalidateReleaseForClient(clientId: string) {
 
 export async function getLocalEdgeSnapshot(): Promise<OrderedLocalEdgeSnapshot> {
   if (resetStarted) {
-    // This worker instance is being torn down by a reset: answer from memory
-    // only so a stray post-reset pull can never re-create the metadata
-    // database the reset just deleted.
-    return {
-      ...currentKernelObservationIdentity(),
-      localEdgeEnabled: false,
-      mode: 'network-only',
-    }
+    return resetNetworkOnlySnapshot()
   }
 
-  await ensureMetadataAuthority()
-  const { durableState, memoryState, identity } =
-    await readStableKernelObservation(
+  try {
+    await ensureMetadataAuthority()
+  } catch (error) {
+    if (resetStarted) {
+      return resetNetworkOnlySnapshot()
+    }
+    throw error
+  }
+  if (resetStarted) {
+    return resetNetworkOnlySnapshot()
+  }
+  let stableObservation: Awaited<
+    ReturnType<typeof readStableKernelObservation<
+      Awaited<ReturnType<typeof readKernelSnapshotMetadata>>
+    >>
+  >
+  try {
+    stableObservation = await readStableKernelObservation(
       () => readKernelSnapshotMetadata(requiredMetadataEpoch()),
       () => revalidationInstall,
     )
+  } catch (error) {
+    if (resetStarted) {
+      return resetNetworkOnlySnapshot()
+    }
+    throw error
+  }
+  const { durableState, memoryState, identity } = stableObservation
+  if (resetStarted) {
+    return resetNetworkOnlySnapshot()
+  }
   const observedInstall = memoryState as
     | ObservedRevalidationInstall
     | undefined
@@ -163,11 +182,25 @@ export function resetReleaseRuntime() {
   if (!resetInFlight) {
     resetStarted = true
     revalidationAbortController?.abort()
-    revalidationInstall = undefined
-    advanceKernelObservation()
-    resetInFlight = finishReset()
+    resetObservationReady = runKernelLifecycleMutation(async () => {
+      revalidationInstall = undefined
+      advanceKernelObservation()
+    })
+    resetInFlight = resetObservationReady.then(() => finishReset())
   }
   return resetInFlight
+}
+
+async function resetNetworkOnlySnapshot(): Promise<OrderedLocalEdgeSnapshot> {
+  // Wait until reset's observation transition has advanced the revision. This
+  // avoids publishing contradictory active/network-only snapshots at one
+  // identity while still keeping metadata deletion outside the lifecycle gate.
+  await resetObservationReady
+  return {
+    ...currentKernelObservationIdentity(),
+    localEdgeEnabled: false,
+    mode: 'network-only',
+  }
 }
 
 export function hasResetStarted() {

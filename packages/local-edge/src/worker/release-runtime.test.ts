@@ -342,6 +342,79 @@ describe('release-runtime candidate install progress', () => {
     )
   })
 
+  it('linearizes an in-flight snapshot after reset as network-only', async () => {
+    const metadata = await import('./release-metadata.ts')
+    let markReadStarted!: () => void
+    let releaseRead!: () => void
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve
+    })
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve
+    })
+    vi.mocked(metadata.readKernelSnapshotMetadata).mockImplementationOnce(
+      async () => {
+        markReadStarted()
+        await readGate
+        return {
+          localEdgeEnabled: true,
+          releaseState: {
+            active: makeReleaseDescriptor(5).release,
+            retained: [],
+          },
+        }
+      },
+    )
+
+    const inFlightSnapshot = runtime.getLocalEdgeSnapshot()
+    await readStarted
+    const reset = runtime.resetReleaseRuntime()
+    releaseRead()
+
+    const snapshot = await inFlightSnapshot
+    const laterSnapshot = await runtime.getLocalEdgeSnapshot()
+    expect(snapshot).toMatchObject({
+      localEdgeEnabled: false,
+      mode: 'network-only',
+    })
+    expect(laterSnapshot).toMatchObject({
+      localEdgeEnabled: false,
+      mode: 'network-only',
+      observationRevision: snapshot.observationRevision,
+    })
+    await reset
+  })
+
+  it('answers an in-flight snapshot from memory when reset interrupts a failing durable read', async () => {
+    const metadata = await import('./release-metadata.ts')
+    let markReadStarted!: () => void
+    let releaseRead!: () => void
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve
+    })
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve
+    })
+    vi.mocked(metadata.readKernelSnapshotMetadata).mockImplementationOnce(
+      async () => {
+        markReadStarted()
+        await readGate
+        throw new Error('database deleted during read')
+      },
+    )
+
+    const inFlightSnapshot = runtime.getLocalEdgeSnapshot()
+    await readStarted
+    const reset = runtime.resetReleaseRuntime()
+    releaseRead()
+
+    await expect(inFlightSnapshot).resolves.toMatchObject({
+      localEdgeEnabled: false,
+      mode: 'network-only',
+    })
+    await reset
+  })
+
   it('rejects revalidation attempts after a reset', async () => {
     await runtime.resetReleaseRuntime()
 

@@ -70,11 +70,16 @@ export type RevalidationObservation =
       progress?: KernelRevalidationProgress
     }
 
+export type RevalidationObservationRejection =
+  | 'superseded'
+  | 'foreign-instance'
+  | 'conflict'
+
 export interface RevalidationObservationDecision {
   cursor: RevalidationObservationCursor
   accepted: boolean
   applySnapshot: boolean
-  protocolConflict: boolean
+  rejection?: RevalidationObservationRejection
 }
 
 export function reduceRevalidationObservation(
@@ -86,7 +91,7 @@ export function reduceRevalidationObservation(
     observation.identity.kernelInstanceId !== cursor.kernelInstanceId
   ) {
     if (observation.kind !== 'snapshot') {
-      return rejected(cursor, false)
+      return rejected(cursor, 'foreign-instance')
     }
     return accepted(cursorFromObservation(observation), true)
   }
@@ -101,11 +106,11 @@ export function reduceRevalidationObservation(
   const revisionDelta =
     observation.identity.observationRevision - cursor.observationRevision
   if (revisionDelta < 0) {
-    return rejected(cursor, false)
+    return rejected(cursor, 'superseded')
   }
   if (revisionDelta > 0) {
     if (!isForwardObservationCompatible(cursor, observation)) {
-      return rejected(cursor, true)
+      return rejected(cursor, 'conflict')
     }
     return accepted(
       cursorFromObservation(observation),
@@ -128,13 +133,13 @@ function reduceEqualRevision(
         !bindingsAgree(cursor.attempt, attempt) ||
         !progressAgrees(cursor.progress, observation.progress)
       ) {
-        return rejected(cursor, true)
+        return rejected(cursor, 'conflict')
       }
       return accepted(cursor, true)
     }
 
     if (cursor.phase === 'running') {
-      return rejected(cursor, true)
+      return rejected(cursor, 'conflict')
     }
     // A terminal event/response is a partial view of the same settled kernel
     // state. The equal-revision snapshot is authoritative enrichment and may
@@ -149,16 +154,16 @@ function reduceEqualRevision(
       !bindingsAgree(cursor.attempt, attempt) ||
       cursor.progress?.completedAssets !== observation.completedAssets
     ) {
-      return rejected(cursor, true)
+      return rejected(cursor, 'conflict')
     }
     return accepted(cursor, false)
   }
 
   if (cursor.phase !== 'settled') {
-    return rejected(cursor, true)
+    return rejected(cursor, 'conflict')
   }
   if (cursor.attempt && !bindingsAgree(cursor.attempt, observation.attempt)) {
-    return rejected(cursor, true)
+    return rejected(cursor, 'conflict')
   }
   return accepted(
     cursor.attempt
@@ -300,19 +305,19 @@ function accepted(
     cursor,
     accepted: true,
     applySnapshot,
-    protocolConflict: false,
+    rejection: undefined,
   }
 }
 
 function rejected(
   cursor: RevalidationObservationCursor,
-  protocolConflict: boolean,
+  rejection: RevalidationObservationRejection,
 ): RevalidationObservationDecision {
   return {
     cursor,
     accepted: false,
     applySnapshot: false,
-    protocolConflict,
+    rejection,
   }
 }
 

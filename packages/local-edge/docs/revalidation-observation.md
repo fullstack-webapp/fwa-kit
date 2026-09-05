@@ -92,7 +92,7 @@ metadata epoch + kernel instance + attempt + release
 - final verification reopens the candidate cache by name while holding the same lock, so a detached cache object cannot authorize an unreachable release after a concurrent delete;
 - a pre-reset worker with an old pinned epoch treats missing or replaced metadata as permanent loss of authority.
 
-Reset preserves the old instance identity in memory for its final network-only responses, aborts owned work, deletes metadata, and unregisters. A later activated replacement bootstraps a new metadata epoch.
+Reset preserves the old instance identity in memory for its final network-only responses, aborts owned work, deletes metadata, and unregisters. The reset flag and observation revision transition through the lifecycle mutation boundary, and a snapshot re-checks reset after its durable read so its linearization point cannot pair pre-reset release metadata with post-reset identity. Metadata deletion remains outside the lifecycle gate. A later activated replacement bootstraps a new metadata epoch.
 
 ## Document provenance
 
@@ -114,7 +114,9 @@ One pure reducer owns progress ordering for both startup and later snapshots. Re
 
 For one established instance:
 
-- lower revision: discard the entire observation, including release projection;
+- lower revision: discard the entire observation, including release projection; it is superseded by truth already accepted and does not trigger a recovery pull or runtime error;
+- foreign-instance message: retain the established instance and coalesce one authoritative recovery pull;
+- conflicting message: retain the cursor and coalesce one authoritative recovery pull; a conflicting snapshot consumes its current recovery read and defers as described below;
 - higher progress revision: bind the attempt and publish its count;
 - higher terminal revision: settle and clear progress;
 - higher snapshot revision: publish snapshot progress or clear when idle;
@@ -124,7 +126,9 @@ For one established instance:
   - running snapshot followed by matching progress is compatible;
   - a running/settled conflict or changed attempt/release/total is invalid.
 
-One `(kernelInstanceId, attemptId)` permanently binds one `releaseId` and `totalAssets`; counts remain within bounds and never decrease for that attempt. Malformed or conflicting observations do not advance the reducer and trigger one coalesced recovery pull.
+One `(kernelInstanceId, attemptId)` permanently binds one `releaseId` and `totalAssets`; counts remain within bounds and never decrease for that attempt. Malformed, foreign-instance, or conflicting messages do not advance the reducer and trigger one coalesced recovery pull. A conflicting snapshot consumes that recovery read and defers projection without repeating the same deterministic conflict. Superseded observations do not trigger a pull because the cursor already holds newer authority.
+
+A state pull retries boundedly while responses are superseded by newer accepted observations. Exhaustion, or a conflicting recovery snapshot, is a deferred projection rather than a kernel failure: the document preserves its newer cursor and the next terminal event, response, controller change, or scheduled pull retries recovery. Transport, HTTP, and invalid-wire failures remain failures.
 
 A lost terminal event heals on the next successful state read. When scheduled checks are disabled, healing is not time-bounded unless another terminal/response, controller change, explicit revalidation, visibility/online trigger, or consumer action causes a pull; the public UI therefore keeps spinner fallback and never treats percentage as durable truth.
 

@@ -13,6 +13,7 @@ import {
   type OrderedLocalEdgeSnapshot,
   type RevalidationObservation,
   type RevalidationObservationCursor,
+  type RevalidationObservationRejection,
 } from '../revalidation-observation.ts'
 import {
   defaultUpdateCheckIntervalMinutes,
@@ -91,6 +92,8 @@ interface LocalEdgeDocumentRuntime {
   networkUrl(currentUrl?: string): string
 }
 
+const maxSnapshotPullAttempts = 8
+
 const initialState: LocalEdgeClientState = {
   phase: 'starting',
   controlled: false,
@@ -116,6 +119,7 @@ export function createLocalEdgeDocumentRuntime(
   let lastKernelMode: LocalEdgeSnapshot['mode'] | undefined
   let snapshotPullQueued = false
   let queuedSnapshotWarning: string | undefined
+  let queuedSnapshotFailureVisible = false
   let started = false
   let stopped = false
   let scheduledChecksStarted = false
@@ -300,44 +304,38 @@ export function createLocalEdgeDocumentRuntime(
     read: Extract<KernelSnapshotRead, { kind: 'legacy' | 'ordered' }>,
     projection: 'startup' | 'settled',
     warning?: string,
-  ) => {
+  ): 'applied' | RevalidationObservationRejection => {
     if (read.kind === 'legacy') {
       orderedProgressEnabled = false
       lastKernelMode = read.snapshot.mode
       observationCursor = { phase: 'unknown' }
       if (projection === 'startup') publishStartupSnapshot(read.snapshot, undefined, warning)
       else publishSettledSnapshotValue(read.snapshot, undefined, warning)
-      return true
+      return 'applied'
     }
     orderedProgressEnabled = true
     const decision = reduceRevalidationObservation(observationCursor, {
       kind: 'snapshot', identity: read.snapshot, progress: read.snapshot.revalidation,
     })
-    if (!decision.accepted) return false
+    if (!decision.accepted) return decision.rejection ?? 'conflict'
     lastKernelMode = read.snapshot.mode
     observationCursor = decision.cursor
     const progress = cursorProgress()
     if (projection === 'startup') publishStartupSnapshot(read.snapshot, progress, warning)
     else publishSettledSnapshotValue(read.snapshot, progress, warning)
-    return true
+    return 'applied'
   }
 
-  const isOrderedSnapshotOlderThanCursor = (
-    read: Extract<KernelSnapshotRead, { kind: 'legacy' | 'ordered' }>,
-  ) =>
-    read.kind === 'ordered' &&
-    observationCursor.phase !== 'unknown' &&
-    read.snapshot.kernelInstanceId === observationCursor.kernelInstanceId &&
-    read.snapshot.observationRevision < observationCursor.observationRevision
-
-  const publishSettledSnapshot = async (warning?: string) => {
+  const publishSettledSnapshot = async (
+    warning?: string,
+  ): Promise<'published' | 'deferred'> => {
     if (explicitNetworkOpen) {
       const { revalidationProgress: _dropped, ...rest } = state
       void _dropped
       publish(warning === undefined ? rest : { ...rest, message: warning })
-      return
+      return 'published'
     }
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < maxSnapshotPullAttempts; attempt += 1) {
       const read = await fetchKernelSnapshot()
       if (read.kind === 'stale-controller') continue
       if (read.kind === 'uncontrolled') {
@@ -346,27 +344,46 @@ export function createLocalEdgeDocumentRuntime(
           updateAvailable: false,
           message: warning ?? '页面尚未受 Local Edge 控制，继续使用 network baseline。',
         })
-        return
+        return 'published'
       }
       if (read.kind === 'incompatible') throw new Error('active Service Worker does not expose the FWA kernel API')
       if (read.kind === 'unavailable') throw read.error
-      if (applySnapshotRead(read, 'settled', warning)) return
+      const application = applySnapshotRead(read, 'settled', warning)
+      if (application === 'applied') {
+        return 'published'
+      }
+      if (application !== 'superseded') {
+        // A conflict has already consumed this recovery read. Preserve the
+        // established cursor rather than repeating a deterministic snapshot.
+        return 'deferred'
+      }
     }
-    throw new Error('FWA kernel observations did not converge')
+    // A newer accepted observation already superseded every fetched snapshot,
+    // or the controller changed while they were in flight. Preserve that newer
+    // state; a terminal event or the next scheduled pull will settle it.
+    return 'deferred'
   }
 
-  const enqueueSnapshotRead = (warning?: string) => {
+  const enqueueSnapshotRead = (
+    warning?: string,
+    publishFailure = true,
+  ) => {
     queuedSnapshotWarning = warning
+    queuedSnapshotFailureVisible ||= publishFailure
     if (snapshotPullQueued) return settlePullChain
     snapshotPullQueued = true
     settlePullChain = settlePullChain.then(async () => {
       const currentWarning = queuedSnapshotWarning
+      const failureVisible = queuedSnapshotFailureVisible
       queuedSnapshotWarning = undefined
+      queuedSnapshotFailureVisible = false
       snapshotPullQueued = false
       try {
         await publishSettledSnapshot(currentWarning)
       } catch (error) {
-        publishRuntimeError(error)
+        if (failureVisible) {
+          publishRuntimeError(error)
+        }
       }
     })
     return settlePullChain
@@ -420,26 +437,29 @@ export function createLocalEdgeDocumentRuntime(
     if (decision.accepted) {
       observationCursor = decision.cursor
       publishCursorProgress()
-    } else {
+    } else if (decision.rejection !== 'superseded') {
       void enqueueSnapshotRead()
     }
   }
 
   const awaitAuthoritativePull = async () => {
-    let releasePull!: () => void
-    let pullFailed = false
+    let releasePull!: (
+      outcome: 'published' | 'deferred' | 'failed',
+    ) => void
+    const outcome = new Promise<'published' | 'deferred' | 'failed'>((resolve) => {
+      releasePull = resolve
+    })
     settlePullChain = settlePullChain.then(async () => {
       try {
-        await publishSettledSnapshot()
+        releasePull(await publishSettledSnapshot())
       } catch (error) {
-        pullFailed = true
-        publishRuntimeError(error)
-      } finally {
-        releasePull()
+        if (revalidationVisible) {
+          publishRuntimeError(error)
+        }
+        releasePull('failed')
       }
     })
-    await new Promise<void>((resolve) => { releasePull = resolve })
-    return !pullFailed
+    return outcome
   }
 
   const runRevalidation = async () => {
@@ -448,20 +468,24 @@ export function createLocalEdgeDocumentRuntime(
       if (revalidationVisible) {
         await enqueueSnapshotRead('Release revalidation failed; the last committed release remains active.')
       } else if (state.revalidationProgress) {
-        await enqueueSnapshotRead()
+        await enqueueSnapshotRead(undefined, false)
       }
       return 'failed' as const
     }
     const orderedResult = read.kind === 'ordered'
     if (orderedResult) {
       applyOrderedTerminalResult(read.result)
-      if (!(await awaitAuthoritativePull())) return 'failed' as const
+      const pullOutcome = await awaitAuthoritativePull()
+      if (pullOutcome === 'failed') return 'failed' as const
     }
     const result = read.result
     if (result.status === 'updated') {
       const availableReleaseId = result.release?.releaseId
       if (availableReleaseId && availableReleaseId !== state.releaseId) {
-        if (!orderedResult && !(await awaitAuthoritativePull())) {
+        if (
+          !orderedResult &&
+          (await awaitAuthoritativePull()) === 'failed'
+        ) {
           return 'failed' as const
         }
         return state.updateAvailable ? ('updated' as const) : ('current' as const)
@@ -471,7 +495,10 @@ export function createLocalEdgeDocumentRuntime(
       return 'disabled' as const
     }
     if (result.status === 'disabled') {
-      if (!orderedResult && !(await awaitAuthoritativePull())) {
+      if (
+        !orderedResult &&
+        (await awaitAuthoritativePull()) === 'failed'
+      ) {
         return 'failed' as const
       }
       if (lastKernelMode !== 'disabled') return 'current' as const
@@ -484,11 +511,11 @@ export function createLocalEdgeDocumentRuntime(
       (result.status === 'installed' || result.status === 'enabled' || result.status === 'repaired') &&
       result.release
     ) {
-      await enqueueSnapshotRead()
+      await enqueueSnapshotRead(undefined, false)
     } else if (!orderedResult && result.status !== 'current' && revalidationVisible) {
       await enqueueSnapshotRead()
     } else if (!orderedResult && result.status === 'current' && state.revalidationProgress) {
-      await enqueueSnapshotRead()
+      await enqueueSnapshotRead(undefined, revalidationVisible)
     }
     return 'current' as const
   }
@@ -638,16 +665,22 @@ export function createLocalEdgeDocumentRuntime(
             throw new Error('Service Worker controller changed during startup')
           }
           clearTakeoverAttempt(config.workerPath)
-          snapshotPublished = applySnapshotRead(read, 'startup')
-          let startupReadWasOvertaken =
-            !snapshotPublished && isOrderedSnapshotOlderThanCursor(read)
+          let application = applySnapshotRead(read, 'startup')
+          snapshotPublished = application === 'applied'
+          let startupReadWasOvertaken = application === 'superseded'
           if (!snapshotPublished) {
             const fresh = await fetchKernelSnapshot()
             startupReadWasOvertaken = false
             if (fresh.kind === 'legacy' || fresh.kind === 'ordered') {
-              snapshotPublished = applySnapshotRead(fresh, 'startup')
-              startupReadWasOvertaken =
-                !snapshotPublished && isOrderedSnapshotOlderThanCursor(fresh)
+              application = applySnapshotRead(fresh, 'startup')
+              snapshotPublished = application === 'applied'
+              startupReadWasOvertaken = application === 'superseded'
+            } else if (fresh.kind === 'unavailable') {
+              throw fresh.error
+            } else if (fresh.kind === 'incompatible') {
+              throw new Error('active Service Worker does not expose the FWA kernel API')
+            } else {
+              throw new Error('Service Worker controller changed during startup')
             }
           }
           if (!snapshotPublished && startupReadWasOvertaken) {
@@ -724,7 +757,9 @@ export function createLocalEdgeDocumentRuntime(
         completedAssets: payload.completedAssets,
       })
       if (!decision.accepted) {
-        void enqueueSnapshotRead()
+        if (decision.rejection !== 'superseded') {
+          void enqueueSnapshotRead()
+        }
         return
       }
       orderedProgressEnabled = true
@@ -750,7 +785,9 @@ export function createLocalEdgeDocumentRuntime(
         observationCursor = decision.cursor
         publishCursorProgress()
       }
-      void enqueueSnapshotRead()
+      if (decision.accepted || decision.rejection !== 'superseded') {
+        void enqueueSnapshotRead()
+      }
     }
   }
 
@@ -782,7 +819,10 @@ export function createLocalEdgeDocumentRuntime(
       handleControllerChange,
     )
     navigator.serviceWorker?.addEventListener('message', handleKernelMessage)
-    void startRuntime().catch(publishRuntimeError)
+    void startRuntime().catch((error) => {
+      publishRuntimeError(error)
+      startScheduledChecks()
+    })
   }
 
   const stop = () => {
