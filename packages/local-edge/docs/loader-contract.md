@@ -53,14 +53,14 @@ unsubscribe?.()
 | `setUpdateCheck(config)` | Change the enabled state or interval (1–35,791 minutes) for the current document without persistence |
 | `applyUpdate()` | Reload only when a complete update is available |
 | `reset()` | Clear Local Edge-owned state and enter network mode |
-
-The browser fallback renders reset as a same-origin form navigation. The kernel accepts an exact same-origin `Origin`; for navigation POSTs where iOS omits `Origin`, it accepts browser-controlled `Sec-Fetch-Site: same-origin`, or an exact same-origin `Referer` only when stronger provenance headers are absent. Explicit cross-site fetch metadata, foreign or opaque origins, and provenance-free requests remain forbidden. Programmatic reset continues to require the `X-FWA-Control: reset` header in addition to same-origin request provenance.
-
-A failed `/__fwa/state` response keeps a stable generic message and may include one bounded diagnostic code: `metadata-database-missing`, `metadata-epoch-missing`, or `kernel-snapshot-failed`. Diagnostics display the code but never expose arbitrary exception text or stack data. Older kernels without a code remain supported.
 | `networkUrl(url?)` | Preserve the URL while adding `__fwa=network` |
 | `openNetwork()` | Navigate to `networkUrl()` |
 | `paths` | Read the derived scope, worker, descriptor, and control paths |
 | `debug.*` | Read, subscribe to, and change diagnostics state without navigation |
+
+The browser fallback renders reset as a same-origin form navigation. The kernel accepts an exact same-origin `Origin`; for navigation POSTs where iOS omits `Origin`, it accepts browser-controlled `Sec-Fetch-Site: same-origin`, or an exact same-origin `Referer` only when stronger provenance headers are absent. Explicit cross-site fetch metadata, foreign or opaque origins, and provenance-free requests remain forbidden. Programmatic reset continues to require the `X-FWA-Control: reset` header in addition to same-origin request provenance.
+
+A failed `/__fwa/state` response keeps a stable generic message and may include one bounded diagnostic code: `metadata-database-missing`, `metadata-epoch-missing`, or `kernel-snapshot-failed`. Diagnostics display the code but never expose arbitrary exception text or stack data. Older kernels without a code remain supported.
 
 An `updated` result never announces from the response payload: every successful level-2 revalidation response pulls the kernel's state endpoint through the same ordered chain as terminal-message pulls, so the projection reflects the kernel's current active release and a commit that landed in another tab while the response was pending cannot be overwritten by the older release the result carries. If every bounded pull attempt is overtaken by a newer accepted observation, the loader preserves that newer state and defers release projection instead of reporting a false failure; a later terminal event or scheduled pull retries recovery. The silent first-install (`installed`/`enabled`) claim derives from the same ordered fresh-snapshot read. All kernel-observation reads — startup, controller-change, response-driven, and terminal-message pulls — share this ordering, so an older fetch can never overwrite a newer observation. A transient startup snapshot failure may publish an error, but it does not disable scheduled, visibility, or online recovery checks for the document.
 
