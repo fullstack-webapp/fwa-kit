@@ -477,7 +477,10 @@ export function createLocalEdgeDocumentRuntime(
       await enqueueSnapshotRead()
     } else if (result.status !== 'current' && revalidationVisible) {
       await enqueueSnapshotRead()
-    } else if (result.status === 'current' && state.revalidationProgress) {
+    } else if (
+      result.status === 'current' &&
+      (read.kind === 'ordered' || state.revalidationProgress)
+    ) {
       await enqueueSnapshotRead()
     }
     return result.status === 'disabled-current' ? ('disabled' as const) : ('current' as const)

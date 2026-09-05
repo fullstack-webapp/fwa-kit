@@ -1410,6 +1410,50 @@ describe('createLocalEdgeDocumentRuntime', () => {
       })
     })
 
+    it('recovers a missed commit from an ordered current result', async () => {
+      let stateCallCount = 0
+      let activeReleaseId = 'release-a'
+      const { runtime } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: activeReleaseId },
+              },
+              activeReleaseId === 'release-a' ? 0 : 1,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: activeReleaseId },
+                status: 'current',
+              },
+              activeReleaseId === 'release-a' ? 0 : 1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      const startupStateCalls = stateCallCount
+      activeReleaseId = 'release-c'
+
+      await expect(runtime.revalidate()).resolves.toBe('current')
+
+      expect(runtime.getState()).toMatchObject({
+        releaseId: 'release-a',
+        availableReleaseId: 'release-c',
+        updateAvailable: true,
+      })
+      expect(stateCallCount).toBe(startupStateCalls + 1)
+    })
+
     it('does not let a slow startup read overwrite a newer commit observation', async () => {
       let stateCall = 0
       const { runtime, serviceWorker } = createControlledKernel({
@@ -2235,6 +2279,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
 
     it('retries a delayed lower-revision snapshot without resurrecting old attempt progress', async () => {
       let stateCall = 0
+      let delayNextState = false
       let resolveStale!: (response: Response) => void
       const staleSnapshot = new Promise<Response>((resolve) => {
         resolveStale = resolve
@@ -2254,7 +2299,8 @@ describe('createLocalEdgeDocumentRuntime', () => {
                 1,
               )
             }
-            if (stateCall === 2) {
+            if (delayNextState) {
+              delayNextState = false
               return staleSnapshot
             }
             return orderedKernelSnapshot(
@@ -2286,6 +2332,8 @@ describe('createLocalEdgeDocumentRuntime', () => {
         },
       })
       await settle(runtime)
+      const startupStateCalls = stateCall
+      delayNextState = true
       const source = controllerSource(serviceWorker)
 
       serviceWorker.dispatchEvent(
@@ -2299,7 +2347,7 @@ describe('createLocalEdgeDocumentRuntime', () => {
           source,
         ),
       )
-      await vi.waitFor(() => expect(stateCall).toBe(2))
+      await vi.waitFor(() => expect(stateCall).toBe(startupStateCalls + 1))
       serviceWorker.dispatchEvent(
         kernelMessage(
           {
@@ -2330,7 +2378,9 @@ describe('createLocalEdgeDocumentRuntime', () => {
         ),
       )
 
-      await vi.waitFor(() => expect(stateCall).toBeGreaterThanOrEqual(3))
+      await vi.waitFor(() =>
+        expect(stateCall).toBeGreaterThanOrEqual(startupStateCalls + 2),
+      )
       expect(runtime.getState().revalidationProgress).toEqual({
         releaseId: 'release-b',
         completedAssets: 1,
