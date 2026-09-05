@@ -1503,6 +1503,77 @@ describe('createLocalEdgeDocumentRuntime', () => {
       expect(runtime.getState().releaseId).toBeUndefined()
     })
 
+    it('clears a stale announcement after a silent same-release update', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let activeReleaseId = 'release-c'
+      let observationRevision = 0
+      let revalidationStatus: 'current' | 'updated' = 'current'
+      const { runtime, serviceWorker } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: activeReleaseId },
+              },
+              observationRevision,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: true,
+                release: { releaseId: activeReleaseId },
+                status: revalidationStatus,
+              },
+              observationRevision,
+              revalidationStatus === 'updated' ? observationRevision : undefined,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      activeReleaseId = 'release-d'
+      observationRevision = 1
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          {
+            type: fwaRevalidationCommittedMessageType,
+            observationRevision,
+            attemptId: observationRevision,
+            releaseId: activeReleaseId,
+          },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() =>
+        expect(runtime.getState()).toMatchObject({
+          releaseId: 'release-c',
+          availableReleaseId: 'release-d',
+          updateAvailable: true,
+        }),
+      )
+
+      activeReleaseId = 'release-c'
+      observationRevision = 2
+      revalidationStatus = 'updated'
+      fakeScheduler.advanceTime(5 * 60 * 1_000)
+
+      await vi.waitFor(() =>
+        expect(runtime.getState()).toMatchObject({
+          releaseId: 'release-c',
+          availableReleaseId: undefined,
+          updateAvailable: false,
+        }),
+      )
+    })
+
     it('does not let a slow startup read overwrite a newer commit observation', async () => {
       let stateCall = 0
       const { runtime, serviceWorker } = createControlledKernel({

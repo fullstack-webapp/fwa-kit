@@ -452,41 +452,42 @@ export function createLocalEdgeDocumentRuntime(
       }
       return 'failed' as const
     }
-    if (read.kind === 'ordered') {
+    const orderedResult = read.kind === 'ordered'
+    if (orderedResult) {
       applyOrderedTerminalResult(read.result)
+      if (!(await awaitAuthoritativePull())) return 'failed' as const
     }
     const result = read.result
     if (result.status === 'updated') {
       const availableReleaseId = result.release?.releaseId
       if (availableReleaseId && availableReleaseId !== state.releaseId) {
-        if (!(await awaitAuthoritativePull())) return 'failed' as const
+        if (!orderedResult && !(await awaitAuthoritativePull())) {
+          return 'failed' as const
+        }
         return state.updateAvailable ? ('updated' as const) : ('current' as const)
       }
     }
     if (result.status === 'disabled-current') {
-      if (read.kind === 'ordered' && !(await awaitAuthoritativePull())) {
-        return 'failed' as const
-      }
       return 'disabled' as const
     }
     if (result.status === 'disabled') {
-      if (!(await awaitAuthoritativePull())) return 'failed' as const
+      if (!orderedResult && !(await awaitAuthoritativePull())) {
+        return 'failed' as const
+      }
       if (lastKernelMode !== 'disabled') return 'current' as const
       if (revalidationVisible) window.location.reload()
       return 'disabled' as const
     }
     if (
+      !orderedResult &&
       !revalidationVisible &&
       (result.status === 'installed' || result.status === 'enabled' || result.status === 'repaired') &&
       result.release
     ) {
       await enqueueSnapshotRead()
-    } else if (result.status !== 'current' && revalidationVisible) {
+    } else if (!orderedResult && result.status !== 'current' && revalidationVisible) {
       await enqueueSnapshotRead()
-    } else if (
-      result.status === 'current' &&
-      (read.kind === 'ordered' || state.revalidationProgress)
-    ) {
+    } else if (!orderedResult && result.status === 'current' && state.revalidationProgress) {
       await enqueueSnapshotRead()
     }
     return 'current' as const
