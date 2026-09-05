@@ -1,4 +1,5 @@
 import { localEdgeConfig } from '../config.ts'
+import type { FwaKernelSnapshotFailureCode } from '../config-contract.ts'
 import type { AppRelease } from '../release.ts'
 
 const databaseName = `fwa-local-edge:${localEdgeConfig.appId}`
@@ -11,7 +12,23 @@ const candidateJournalKey = 'candidateJournal'
 const releaseObservationSeqKey = 'releaseObservationSeq'
 const appliedReleaseObservationSeqKey = 'appliedReleaseObservationSeq'
 const metadataEpochKey = 'metadataEpoch'
+const legacyCandidateCleanupKey = 'legacyCandidateCleanup'
 const localEdgeEnabledKey = 'localEdgeEnabled'
+
+type MetadataAuthorityFailureCode = Exclude<
+  FwaKernelSnapshotFailureCode,
+  'kernel-snapshot-failed'
+>
+
+export class MetadataAuthorityError extends Error {
+  readonly code: MetadataAuthorityFailureCode
+
+  constructor(code: MetadataAuthorityFailureCode, message: string) {
+    super(message)
+    this.name = 'MetadataAuthorityError'
+    this.code = code
+  }
+}
 
 export interface ReleaseState {
   active?: AppRelease
@@ -39,24 +56,96 @@ export async function readOrCreateMetadataEpoch(allowCreate: boolean) {
     return await new Promise<string>((resolve, reject) => {
       const transaction = database.transaction(storeName, 'readwrite')
       const store = transaction.objectStore(storeName)
-      const request = store.get(metadataEpochKey)
-      request.onsuccess = () => {
-        if (typeof request.result === 'string' && request.result.length > 0) {
-          resolve(request.result)
+      const epochRequest = store.get(metadataEpochKey)
+      const activeRequest = store.get(activeReleaseKey)
+      const previousRequest = store.get(previousReleaseKey)
+      const retainedRequest = store.get(retainedReleasesKey)
+      const candidateRequest = store.get(candidateJournalKey)
+      let resolvedEpoch: string | undefined
+      let rejection: Error | undefined
+
+      const settle = () => {
+        if (
+          resolvedEpoch !== undefined ||
+          rejection !== undefined ||
+          [
+            epochRequest,
+            activeRequest,
+            previousRequest,
+            retainedRequest,
+            candidateRequest,
+          ].some((request) => request.readyState !== 'done')
+        ) {
           return
         }
-        if (!allowCreate) {
+
+        if (
+          typeof epochRequest.result === 'string' &&
+          epochRequest.result.length > 0
+        ) {
+          resolvedEpoch = epochRequest.result
+          return
+        }
+
+        const legacyReleaseState = normalizeStoredReleaseState(
+          activeRequest.result,
+          retainedRequest.result,
+          previousRequest.result,
+        )
+        const hasLegacyReleaseAuthority =
+          legacyReleaseState.active !== undefined ||
+          legacyReleaseState.retained.length > 0
+        if (!allowCreate && !hasLegacyReleaseAuthority) {
+          rejection = new MetadataAuthorityError(
+            'metadata-epoch-missing',
+            'Local Edge metadata epoch is unavailable',
+          )
           transaction.abort()
-          reject(new Error('Local Edge metadata epoch is unavailable'))
           return
         }
-        const metadataEpoch = crypto.randomUUID()
-        store.put(metadataEpoch, metadataEpochKey)
-        transaction.oncomplete = () => resolve(metadataEpoch)
+
+        resolvedEpoch = crypto.randomUUID()
+        store.put(resolvedEpoch, metadataEpochKey)
+        // A pre-epoch journal cannot prove the owner identity required by the
+        // current candidate protocol. Preserve a fenced cleanup marker so a
+        // capable restarted global can remove its unreferenced cache before
+        // forgetting the journal.
+        const legacyCandidateReleaseId = isRecord(candidateRequest.result)
+          ? candidateRequest.result.releaseId
+          : undefined
+        if (
+          typeof legacyCandidateReleaseId === 'string' &&
+          legacyCandidateReleaseId.length > 0
+        ) {
+          store.put(
+            { metadataEpoch: resolvedEpoch, releaseId: legacyCandidateReleaseId },
+            legacyCandidateCleanupKey,
+          )
+        }
+        if (candidateRequest.result !== undefined) {
+          store.delete(candidateJournalKey)
+        }
       }
-      request.onerror = () => reject(request.error)
+
+      epochRequest.onsuccess = settle
+      activeRequest.onsuccess = settle
+      previousRequest.onsuccess = settle
+      retainedRequest.onsuccess = settle
+      candidateRequest.onsuccess = settle
+      transaction.oncomplete = () => {
+        if (resolvedEpoch !== undefined) {
+          resolve(resolvedEpoch)
+        } else {
+          reject(new Error('metadata epoch transaction completed without authority'))
+        }
+      }
       transaction.onerror = () => reject(transaction.error)
-      transaction.onabort = () => reject(transaction.error ?? new Error('metadata epoch transaction aborted'))
+      transaction.onabort = () =>
+        reject(
+          rejection ??
+            transaction.error ??
+            new Error('metadata epoch transaction aborted'),
+        )
     })
   } finally {
     database.close()
@@ -66,6 +155,80 @@ export async function readOrCreateMetadataEpoch(allowCreate: boolean) {
 export interface ReleaseObservation {
   metadataEpoch: string
   observationSeq: number
+}
+
+export async function readLegacyCandidateCleanup(metadataEpoch: string) {
+  const database = await openDatabase()
+
+  try {
+    return await new Promise<string | undefined>((resolve, reject) => {
+      const transaction = database.transaction(storeName, 'readonly')
+      const store = transaction.objectStore(storeName)
+      const epochRequest = store.get(metadataEpochKey)
+      const cleanupRequest = store.get(legacyCandidateCleanupKey)
+      transaction.oncomplete = () => {
+        if (epochRequest.result !== metadataEpoch) {
+          reject(new Error('release runtime lost metadata authority'))
+          return
+        }
+        const cleanup = cleanupRequest.result
+        resolve(
+          isRecord(cleanup) &&
+            cleanup.metadataEpoch === metadataEpoch &&
+            typeof cleanup.releaseId === 'string' &&
+            cleanup.releaseId.length > 0
+            ? cleanup.releaseId
+            : undefined,
+        )
+      }
+      transaction.onerror = () => reject(transaction.error)
+      transaction.onabort = () => reject(transaction.error)
+    })
+  } finally {
+    database.close()
+  }
+}
+
+export async function clearLegacyCandidateCleanup(
+  metadataEpoch: string,
+  releaseId: string,
+) {
+  const database = await openDatabase()
+
+  try {
+    return await new Promise<boolean>((resolve, reject) => {
+      const transaction = database.transaction(storeName, 'readwrite')
+      const store = transaction.objectStore(storeName)
+      const epochRequest = store.get(metadataEpochKey)
+      const cleanupRequest = store.get(legacyCandidateCleanupKey)
+      let cleared = false
+      const clear = () => {
+        if (
+          epochRequest.readyState !== 'done' ||
+          cleanupRequest.readyState !== 'done'
+        ) {
+          return
+        }
+        const cleanup = cleanupRequest.result
+        if (
+          epochRequest.result === metadataEpoch &&
+          isRecord(cleanup) &&
+          cleanup.metadataEpoch === metadataEpoch &&
+          cleanup.releaseId === releaseId
+        ) {
+          cleared = true
+          store.delete(legacyCandidateCleanupKey)
+        }
+      }
+      epochRequest.onsuccess = clear
+      cleanupRequest.onsuccess = clear
+      transaction.oncomplete = () => resolve(cleared)
+      transaction.onerror = () => reject(transaction.error)
+      transaction.onabort = () => reject(transaction.error)
+    })
+  } finally {
+    database.close()
+  }
 }
 
 export async function allocateReleaseObservation(metadataEpoch: string) {
@@ -709,11 +872,13 @@ function openDatabase(
 ): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(databaseName, 1)
+    let rejectedMissingDatabase = false
     request.onupgradeneeded = (event) => {
       if (
         options.allowCreate === false &&
         (event as IDBVersionChangeEvent).oldVersion === 0
       ) {
+        rejectedMissingDatabase = true
         request.transaction?.abort()
         return
       }
@@ -725,7 +890,15 @@ function openDatabase(
       request.result.onversionchange = () => request.result.close()
       resolve(request.result)
     }
-    request.onerror = () => reject(request.error ?? new Error('metadata database unavailable'))
+    request.onerror = () =>
+      reject(
+        rejectedMissingDatabase
+          ? new MetadataAuthorityError(
+              'metadata-database-missing',
+              'Local Edge metadata database is unavailable',
+            )
+          : request.error ?? new Error('metadata database unavailable'),
+      )
   })
 }
 

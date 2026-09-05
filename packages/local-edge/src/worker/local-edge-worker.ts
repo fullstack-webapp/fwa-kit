@@ -15,6 +15,7 @@ import {
   recoverUnhandledRequest,
   resetConfirmationResponse,
 } from './kernel-recovery.ts'
+import { MetadataAuthorityError } from './release-metadata.ts'
 import {
   activateReleaseRuntime,
   getLocalEdgeSnapshot,
@@ -169,9 +170,12 @@ async function stateResponse(request: Request) {
         ...identityHeaders,
       },
     })
-  } catch {
+  } catch (error) {
     return Response.json(
-      { error: 'kernel snapshot temporarily unavailable' },
+      {
+        error: 'kernel snapshot temporarily unavailable',
+        code: kernelSnapshotFailureCode(error),
+      },
       {
         status: 503,
         headers: {
@@ -181,6 +185,12 @@ async function stateResponse(request: Request) {
       },
     )
   }
+}
+
+export function kernelSnapshotFailureCode(error: unknown) {
+  return error instanceof MetadataAuthorityError
+    ? error.code
+    : 'kernel-snapshot-failed'
 }
 
 async function revalidationResponse(event: FetchEvent) {

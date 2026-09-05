@@ -45,6 +45,13 @@ export const fwaTakeoverMessageType = '__fwa:takeover'
 export const fwaRevalidationProgressMessageType = '__fwa:revalidation-progress'
 export const fwaRevalidationCommittedMessageType = '__fwa:revalidation-committed'
 export const fwaRevalidationFailedMessageType = '__fwa:revalidation-failed'
+export const fwaKernelSnapshotFailureCodes = [
+  'metadata-database-missing',
+  'metadata-epoch-missing',
+  'kernel-snapshot-failed',
+] as const
+export type FwaKernelSnapshotFailureCode =
+  (typeof fwaKernelSnapshotFailureCodes)[number]
 export type LocalEdgeNavigationMode = 'network' | 'reset'
 export type LocalEdgeDebugSeed = 'enable' | 'disable' | 'reset'
 
@@ -61,6 +68,15 @@ export function isValidUpdateCheckIntervalMinutes(
     Number.isSafeInteger(value) &&
     value > 0 &&
     value <= maxUpdateCheckIntervalMinutes
+  )
+}
+
+export function isFwaKernelSnapshotFailureCode(
+  value: unknown,
+): value is FwaKernelSnapshotFailureCode {
+  return (
+    typeof value === 'string' &&
+    (fwaKernelSnapshotFailureCodes as readonly string[]).includes(value)
   )
 }
 
