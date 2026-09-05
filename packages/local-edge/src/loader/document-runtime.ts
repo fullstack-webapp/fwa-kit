@@ -463,6 +463,12 @@ export function createLocalEdgeDocumentRuntime(
         return state.updateAvailable ? ('updated' as const) : ('current' as const)
       }
     }
+    if (result.status === 'disabled-current') {
+      if (read.kind === 'ordered' && !(await awaitAuthoritativePull())) {
+        return 'failed' as const
+      }
+      return 'disabled' as const
+    }
     if (result.status === 'disabled') {
       if (!(await awaitAuthoritativePull())) return 'failed' as const
       if (lastKernelMode !== 'disabled') return 'current' as const
@@ -483,7 +489,7 @@ export function createLocalEdgeDocumentRuntime(
     ) {
       await enqueueSnapshotRead()
     }
-    return result.status === 'disabled-current' ? ('disabled' as const) : ('current' as const)
+    return 'current' as const
   }
 
   const showRevalidationActivity = () => {

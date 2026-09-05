@@ -1454,6 +1454,55 @@ describe('createLocalEdgeDocumentRuntime', () => {
       expect(stateCallCount).toBe(startupStateCalls + 1)
     })
 
+    it('re-syncs state after a silent ordered disabled-current result', async () => {
+      const fakeScheduler = createFakeScheduler()
+      let mode: 'active' | 'disabled' = 'active'
+      const { runtime } = createControlledKernel({
+        scheduler: fakeScheduler.scheduler,
+        updateCheck: { intervalMinutes: 5 },
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: mode === 'active',
+                mode,
+                ...(mode === 'active'
+                  ? { release: { releaseId: 'release-a' } }
+                  : undefined),
+              },
+              mode === 'active' ? 0 : 1,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            return orderedKernelResult(
+              {
+                localEdgeEnabled: mode === 'active',
+                ...(mode === 'active'
+                  ? { release: { releaseId: 'release-a' } }
+                  : undefined),
+                status: mode === 'active' ? 'current' : 'disabled-current',
+              },
+              mode === 'active' ? 0 : 1,
+            )
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+      mode = 'disabled'
+      fakeScheduler.advanceTime(5 * 60 * 1_000)
+
+      await vi.waitFor(() =>
+        expect(runtime.getState()).toMatchObject({
+          phase: 'network-only',
+          updateAvailable: false,
+          availableReleaseId: undefined,
+        }),
+      )
+      expect(runtime.getState().releaseId).toBeUndefined()
+    })
+
     it('does not let a slow startup read overwrite a newer commit observation', async () => {
       let stateCall = 0
       const { runtime, serviceWorker } = createControlledKernel({
