@@ -1121,6 +1121,83 @@ describe('createLocalEdgeDocumentRuntime', () => {
       return event
     }
 
+    it('preserves a failure warning when its snapshot pull is coalesced', async () => {
+      let stateCallCount = 0
+      let revalidationCallCount = 0
+      let delayNextState = false
+      let resolveDelayedState!: (response: Response) => void
+      const delayedState = new Promise<Response>((resolve) => {
+        resolveDelayedState = resolve
+      })
+      const { runtime, serviceWorker } = createControlledKernel({
+        fetch: async (input) => {
+          const requestUrl = String(input)
+          if (requestUrl === '/__fwa/state') {
+            stateCallCount += 1
+            if (delayNextState) {
+              delayNextState = false
+              return delayedState
+            }
+            return orderedKernelSnapshot(
+              {
+                localEdgeEnabled: true,
+                mode: 'active',
+                release: { releaseId: 'release-a' },
+              },
+              stateCallCount === 1 ? 0 : 22,
+            )
+          }
+          if (requestUrl === '/__fwa/revalidate') {
+            revalidationCallCount += 1
+            if (revalidationCallCount === 1) {
+              return orderedKernelResult(
+                {
+                  localEdgeEnabled: true,
+                  release: { releaseId: 'release-a' },
+                  status: 'current',
+                },
+                0,
+              )
+            }
+            return new Response('boom', { status: 503 })
+          }
+          throw new Error(`unexpected fetch: ${requestUrl}`)
+        },
+      })
+      await settle(runtime)
+
+      delayNextState = true
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      await vi.waitFor(() => expect(stateCallCount).toBe(2))
+      serviceWorker.dispatchEvent(
+        kernelMessage(
+          { type: fwaRevalidationCommittedMessageType },
+          controllerSource(serviceWorker),
+        ),
+      )
+      const explicitOutcome = runtime.revalidate()
+      resolveDelayedState(
+        orderedKernelSnapshot(
+          {
+            localEdgeEnabled: true,
+            mode: 'active',
+            release: { releaseId: 'release-a' },
+          },
+          21,
+        ),
+      )
+
+      await expect(explicitOutcome).resolves.toBe('failed')
+      expect(runtime.getState().message).toBe(
+        'Release revalidation failed; the last committed release remains active.',
+      )
+    })
+
     it('publishes revalidationProgress from the kernel snapshot when a pull sees an install', async () => {
       const { runtime } = createControlledKernel({
         snapshotRevalidation: {

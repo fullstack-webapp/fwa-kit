@@ -115,6 +115,7 @@ export function createLocalEdgeDocumentRuntime(
   let orderedProgressEnabled = false
   let lastKernelMode: LocalEdgeSnapshot['mode'] | undefined
   let snapshotPullQueued = false
+  let queuedSnapshotWarning: string | undefined
   let started = false
   let stopped = false
   let scheduledChecksStarted = false
@@ -347,12 +348,15 @@ export function createLocalEdgeDocumentRuntime(
   }
 
   const enqueueSnapshotRead = (warning?: string) => {
+    queuedSnapshotWarning = warning
     if (snapshotPullQueued) return settlePullChain
     snapshotPullQueued = true
     settlePullChain = settlePullChain.then(async () => {
+      const currentWarning = queuedSnapshotWarning
+      queuedSnapshotWarning = undefined
       snapshotPullQueued = false
       try {
-        await publishSettledSnapshot(warning)
+        await publishSettledSnapshot(currentWarning)
       } catch (error) {
         publishRuntimeError(error)
       }
