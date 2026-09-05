@@ -12,6 +12,7 @@ const verifierState: {
   descriptor: AppReleaseDescriptor
   failure?: Error
   assetFailure?: Error
+  descriptorGate?: Promise<void>
   gateAssets?: Promise<void>
 } = {
   descriptor: { localEdgeEnabled: false },
@@ -19,6 +20,9 @@ const verifierState: {
 
 vi.mock('./release-verifier.ts', () => ({
   fetchVerifiedReleaseDescriptor: vi.fn(async () => {
+    if (verifierState.descriptorGate) {
+      await verifierState.descriptorGate
+    }
     if (verifierState.failure) {
       throw verifierState.failure
     }
@@ -48,14 +52,23 @@ vi.mock('./release-verifier.ts', () => ({
 
 vi.mock('./release-metadata.ts', () => ({
   readCandidateJournal: vi.fn(async () => undefined),
-  writeCandidateJournal: vi.fn(async () => undefined),
-  clearCandidateJournal: vi.fn(async () => undefined),
+  claimCandidateJournal: vi.fn(async () => undefined),
+  clearCandidateJournalIfOwned: vi.fn(async () => true),
+  markCandidateJournalCleaningIfOwned: vi.fn(async () => true),
+  readOrCreateMetadataEpoch: vi.fn(async () => 'metadata-epoch-test'),
   readReleaseState: vi.fn(async () => ({ retained: [] })),
+  readKernelSnapshotMetadata: vi.fn(async () => ({
+    localEdgeEnabled: true,
+    releaseState: { retained: [] },
+  })),
   readClientReleasePins: vi.fn(async () => new Map()),
-  writeClientReleasePins: vi.fn(async () => undefined),
+  updateClientReleasePin: vi.fn(async () => new Map()),
+  pruneClientReleasePins: vi.fn(async () => new Map()),
   readLocalEdgeEnabled: vi.fn(async () => true),
   writeLocalEdgeEnabled: vi.fn(async () => undefined),
-  writeReleaseState: vi.fn(async () => undefined),
+  writeReleaseStateForCandidate: vi.fn(async () => undefined),
+  writeRetainedReleasesIfActive: vi.fn(async () => true),
+  writeCandidateJournalIfOwned: vi.fn(async () => true),
   deleteReleaseMetadata: vi.fn(async () => undefined),
 }))
 
@@ -94,6 +107,7 @@ describe('release-runtime candidate install progress', () => {
     verifierState.descriptor = makeReleaseDescriptor(5)
     verifierState.failure = undefined
     verifierState.assetFailure = undefined
+    verifierState.descriptorGate = undefined
     verifierState.gateAssets = undefined
 
     const nowSpy = vi.spyOn(Date, 'now')
@@ -104,6 +118,13 @@ describe('release-runtime candidate install progress', () => {
       .mockReturnValueOnce(1300)
       .mockReturnValueOnce(1300)
 
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: vi.fn(
+          async (_name: string, callback: () => Promise<unknown>) => callback(),
+        ),
+      },
+    })
     vi.stubGlobal('self', {
       clients: { matchAll: vi.fn(async () => [client]) },
       location: { origin: 'https://app.test' },
@@ -138,9 +159,15 @@ describe('release-runtime candidate install progress', () => {
   })
 
   it('broadcasts progress through the install and a committed message on success', async () => {
+    const metadata = await import('./release-metadata.ts')
     const result = await runtime.revalidateReleaseForClient('window-1')
 
-    expect(result).toMatchObject({ status: 'installed' })
+    expect(result).toMatchObject({
+      status: 'installed',
+      attemptId: expect.any(Number),
+      kernelInstanceId: expect.any(String),
+      observationRevision: expect.any(Number),
+    })
     const postMessages = client.postMessage.mock.calls.map(
       ([payload]) => payload,
     )
@@ -166,6 +193,37 @@ describe('release-runtime candidate install progress', () => {
           payload.releaseId === releaseId,
       ),
     ).toBe(true)
+    const terminal = postMessages.find(
+      (payload: { type?: string }) =>
+        payload.type === '__fwa:revalidation-committed',
+    ) as {
+      attemptId: number
+      kernelInstanceId: string
+      observationRevision: number
+    }
+    expect(terminal).toMatchObject({
+      attemptId: result.attemptId,
+      kernelInstanceId: result.kernelInstanceId,
+      observationRevision: result.observationRevision,
+    })
+    expect(
+      progressMessages.every(
+        (payload: { attemptId?: number; kernelInstanceId?: string }) =>
+          payload.attemptId === result.attemptId &&
+          payload.kernelInstanceId === result.kernelInstanceId,
+      ),
+    ).toBe(true)
+    expect(vi.mocked(metadata.writeReleaseStateForCandidate)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadataEpoch: 'metadata-epoch-test',
+        attemptId: result.attemptId,
+        kernelInstanceId: result.kernelInstanceId,
+        releaseId,
+      }),
+      expect.objectContaining({
+        active: expect.objectContaining({ releaseId }),
+      }),
+    )
 
     const snapshot = await runtime.getLocalEdgeSnapshot()
     expect(snapshot.revalidation).toBeUndefined()
@@ -239,7 +297,7 @@ describe('release-runtime candidate install progress', () => {
 
     const snapshot = await runtime.getLocalEdgeSnapshot()
 
-    expect(snapshot).toEqual({
+    expect(snapshot).toMatchObject({
       localEdgeEnabled: false,
       mode: 'network-only',
     })
@@ -254,6 +312,164 @@ describe('release-runtime candidate install progress', () => {
     await expect(
       runtime.revalidateReleaseForClient('window-1'),
     ).rejects.toThrow('release runtime is resetting')
+  })
+
+  it.each([
+    ['active', { active: makeReleaseDescriptor(5).release, retained: [] }],
+    [
+      'retained',
+      {
+        active: {
+          ...makeReleaseDescriptor(5).release!,
+          releaseId: 'aaaaaaaaaaaaaaaa',
+        },
+        retained: [makeReleaseDescriptor(5).release!],
+      },
+    ],
+  ])(
+    'preserves a referenced %s release cache when repair installation fails',
+    async (_kind, releaseState) => {
+      const metadata = await import('./release-metadata.ts')
+      const releaseId = makeReleaseDescriptor(5).release!.releaseId
+      const cacheName =
+        `fwa-local-edge:local-edge-package-test:release:${releaseId}`
+      cacheStore.set(cacheName, new Map([['/assets/app-0.js', new Response('old')]]))
+      vi.mocked(metadata.readReleaseState)
+        .mockResolvedValueOnce(releaseState)
+        .mockResolvedValueOnce(releaseState)
+        .mockResolvedValueOnce(releaseState)
+      vi.mocked(metadata.pruneClientReleasePins).mockResolvedValueOnce(
+        new Map([['window-1', releaseId]]),
+      )
+      verifierState.assetFailure = new Error('repair failed')
+
+      await expect(
+        runtime.revalidateReleaseForClient('window-1'),
+      ).rejects.toThrow('repair failed')
+
+      expect(cacheStore.has(cacheName)).toBe(true)
+      expect(caches.delete).not.toHaveBeenCalledWith(cacheName)
+    },
+  )
+
+  it('re-reads release metadata under the commit lock before deriving retained releases', async () => {
+    const metadata = await import('./release-metadata.ts')
+    const candidate = makeReleaseDescriptor(5).release!
+    const active = { ...candidate, releaseId: 'aaaaaaaaaaaaaaaa' }
+    const pruned = { ...candidate, releaseId: 'bbbbbbbbbbbbbbbb' }
+    vi.mocked(metadata.pruneClientReleasePins).mockResolvedValueOnce(
+      new Map([['window-1', pruned.releaseId]]),
+    )
+    vi.mocked(metadata.readReleaseState)
+      .mockResolvedValueOnce({ active, retained: [pruned] })
+      .mockResolvedValueOnce({ active, retained: [pruned] })
+      .mockResolvedValueOnce({ active, retained: [] })
+
+    await runtime.revalidateReleaseForClient('window-1')
+
+    expect(metadata.writeReleaseStateForCandidate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        active: candidate,
+        retained: [active],
+      }),
+    )
+  })
+
+  it('holds descriptor observation and its mode transition under one lock', async () => {
+    const metadata = await import('./release-metadata.ts')
+    let releaseDescriptor!: () => void
+    let lockHeld = false
+    verifierState.descriptor = { localEdgeEnabled: false }
+    verifierState.descriptorGate = new Promise<void>((resolve) => {
+      releaseDescriptor = resolve
+    })
+    const requestLock = navigator.locks.request as unknown as ReturnType<
+      typeof vi.fn
+    >
+    requestLock.mockImplementation(
+      async (_name: string, callback: (lock: Lock) => Promise<unknown>) => {
+        lockHeld = true
+        try {
+          return await callback({} as Lock)
+        } finally {
+          lockHeld = false
+        }
+      },
+    )
+    vi.mocked(metadata.writeLocalEdgeEnabled).mockImplementationOnce(
+      async () => {
+        expect(lockHeld).toBe(true)
+      },
+    )
+
+    const revalidation = runtime.revalidateReleaseForClient('window-1')
+    await vi.waitFor(() => expect(lockHeld).toBe(true))
+    releaseDescriptor()
+
+    await expect(revalidation).resolves.toMatchObject({ status: 'disabled' })
+    expect(lockHeld).toBe(false)
+  })
+
+  it('revokes an in-flight candidate owner before publishing disabled mode', async () => {
+    const metadata = await import('./release-metadata.ts')
+    const previousOwner = {
+      metadataEpoch: 'metadata-epoch-test',
+      kernelInstanceId: '00000000-0000-4000-8000-000000000099',
+      attemptId: 7,
+      releaseId: 'fedcba9876543210',
+      phase: 'installing' as const,
+    }
+    verifierState.descriptor = { localEdgeEnabled: false }
+    vi.mocked(metadata.readCandidateJournal).mockResolvedValueOnce(previousOwner)
+
+    const result = await runtime.revalidateReleaseForClient('window-1')
+
+    expect(result).toMatchObject({
+      status: 'disabled',
+      localEdgeEnabled: false,
+    })
+    expect(metadata.claimCandidateJournal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadataEpoch: 'metadata-epoch-test',
+        releaseId: previousOwner.releaseId,
+        phase: 'cleaning',
+      }),
+    )
+    expect(metadata.clearCandidateJournalIfOwned).toHaveBeenCalled()
+    expect(caches.delete).toHaveBeenCalledWith(
+      `fwa-local-edge:local-edge-package-test:release:${previousOwner.releaseId}`,
+    )
+  })
+
+  it('does not clean candidate state after a superseded commit is rejected', async () => {
+    const metadata = await import('./release-metadata.ts')
+    vi.mocked(metadata.writeReleaseStateForCandidate).mockClear()
+    vi.mocked(metadata.markCandidateJournalCleaningIfOwned).mockClear()
+    vi.mocked(metadata.clearCandidateJournalIfOwned).mockClear()
+    vi.mocked(caches.delete).mockClear()
+    vi.mocked(metadata.writeReleaseStateForCandidate).mockRejectedValueOnce(
+      new Error('Local Edge candidate ownership was superseded'),
+    )
+    vi.mocked(metadata.markCandidateJournalCleaningIfOwned).mockResolvedValueOnce(
+      false,
+    )
+
+    await expect(
+      runtime.revalidateReleaseForClient('window-1'),
+    ).rejects.toThrow('candidate ownership was superseded')
+
+    expect(metadata.clearCandidateJournalIfOwned).not.toHaveBeenCalled()
+    expect(caches.delete).not.toHaveBeenCalledWith(
+      'fwa-local-edge:fwa-local-edge-demo:release:0123456789abcdef',
+    )
+    expect(
+      client.postMessage.mock.calls.some(
+        (call: unknown[]) =>
+          (call[0] as { type?: string })?.type ===
+          '__fwa:revalidation-committed',
+      ),
+    ).toBe(false)
   })
 
   it('keeps a committed install when the committed broadcast fails', async () => {
@@ -308,7 +524,7 @@ describe('release-runtime candidate install progress', () => {
     // The release state becomes active once the install commits, mirroring
     // the worker's persisted state endpoint.
     let committedActive: AppRelease | undefined
-    vi.mocked(metadata.writeReleaseState).mockImplementation(async (state) => {
+    vi.mocked(metadata.writeReleaseStateForCandidate).mockImplementation(async (_owner, state) => {
       committedActive = state.active
     })
     vi.mocked(metadata.readReleaseState).mockImplementation(async () =>
@@ -316,6 +532,12 @@ describe('release-runtime candidate install progress', () => {
         ? { active: committedActive, retained: [] }
         : { retained: [] },
     )
+    vi.mocked(metadata.readKernelSnapshotMetadata).mockImplementation(async () => ({
+      localEdgeEnabled: committedActive ? true : false,
+      releaseState: committedActive
+        ? { active: committedActive, retained: [] }
+        : { retained: [] },
+    }))
     runtime = await import('./release-runtime.ts')
 
     const disabledSnapshot = await runtime.getLocalEdgeSnapshot()
@@ -340,7 +562,7 @@ describe('release-runtime candidate install progress', () => {
     expect(snapshotAtCommit!.release?.releaseId).toBe('0123456789abcdef')
 
     // Restore the factory defaults for the tests that follow.
-    vi.mocked(metadata.writeReleaseState).mockImplementation(async () => undefined)
+    vi.mocked(metadata.writeReleaseStateForCandidate).mockImplementation(async () => undefined)
     vi.mocked(metadata.readReleaseState).mockImplementation(
       async () => ({ retained: [] }),
     )
@@ -432,7 +654,7 @@ describe('release-runtime candidate install progress', () => {
     const progressMessages = client.postMessage.mock.calls
       .map(([payload]) => payload as { type?: string; completedAssets?: number; totalAssets?: number })
       .filter((payload) => payload.type === '__fwa:revalidation-progress')
-    expect(progressMessages).toEqual([
+    expect(progressMessages).toMatchObject([
       {
         type: '__fwa:revalidation-progress',
         releaseId: (verifierState.descriptor as { release?: { releaseId: string } })
@@ -465,7 +687,7 @@ describe('release-runtime candidate install progress', () => {
     const releaseId = (verifierState.descriptor as {
       release?: { releaseId: string }
     }).release?.releaseId
-    expect(midInstallSnapshot.revalidation).toEqual({
+    expect(midInstallSnapshot.revalidation).toMatchObject({
       releaseId,
       completedAssets: 0,
       totalAssets: 5,

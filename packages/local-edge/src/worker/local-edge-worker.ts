@@ -161,12 +161,26 @@ async function stateResponse(request: Request) {
     })
   }
 
-  return Response.json(await getLocalEdgeSnapshot(), {
-    headers: {
-      'Cache-Control': 'no-store',
-      ...fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath),
-    },
-  })
+  const identityHeaders = fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath)
+  try {
+    return Response.json(await getLocalEdgeSnapshot(), {
+      headers: {
+        'Cache-Control': 'no-store',
+        ...identityHeaders,
+      },
+    })
+  } catch {
+    return Response.json(
+      { error: 'kernel snapshot temporarily unavailable' },
+      {
+        status: 503,
+        headers: {
+          'Cache-Control': 'no-store',
+          ...identityHeaders,
+        },
+      },
+    )
+  }
 }
 
 async function revalidationResponse(event: FetchEvent) {
@@ -186,7 +200,10 @@ async function revalidationResponse(event: FetchEvent) {
     const result = await revalidateReleaseForClient(event.clientId)
 
     return Response.json(result, {
-      headers: { 'Cache-Control': 'no-store' },
+      headers: {
+        'Cache-Control': 'no-store',
+        ...fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath),
+      },
     })
   } catch (error) {
     return Response.json(
@@ -196,7 +213,10 @@ async function revalidationResponse(event: FetchEvent) {
       },
       {
         status: 503,
-        headers: { 'Cache-Control': 'no-store' },
+        headers: {
+          'Cache-Control': 'no-store',
+          ...fwaKernelIdentityHeadersFor(localEdgeConfig.workerPath),
+        },
       },
     )
   }

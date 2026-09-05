@@ -37,6 +37,7 @@
     "src/config-contract.ts",
     "src/config.ts",
     "src/release.ts",
+    "src/revalidation-observation.ts",
     "src/route-policy.ts",
     "src/loader/debug-installation.ts",
     "src/loader/debug-panel.ts",
@@ -51,6 +52,7 @@
     "src/worker/bounded-tasks.ts",
     "src/worker/kernel-recovery.ts",
     "src/worker/local-edge-worker.ts",
+    "src/worker/observation-runtime.ts",
     "src/worker/progress.ts",
     "src/worker/release-metadata.ts",
     "src/worker/release-runtime.ts",
@@ -80,6 +82,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
+    "fake-indexeddb": "^6.2.5",
     "oxlint": "^1.71.0",
     "typescript": "~6.0.2",
     "vite": "^8.1.1",
