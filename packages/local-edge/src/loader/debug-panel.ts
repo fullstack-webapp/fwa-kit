@@ -6,6 +6,7 @@ import {
 import {
   pathWithLocalEdgeNavigationMode,
   pathWithoutLocalEdgeNavigationMode,
+  isFwaKernelSnapshotFailureCode,
   localEdgeNavigationModeFor,
 } from '../config-contract.ts'
 import {
@@ -490,7 +491,18 @@ async function readKernelSnapshot(
   try {
     const response = await fetch(localEdge.paths.statePath, { cache: 'no-store' })
     if (!response.ok) {
-      throw new Error(`state returned ${response.status}`)
+      let failureCode: string | undefined
+      try {
+        const payload = await response.json() as { code?: unknown }
+        failureCode = isFwaKernelSnapshotFailureCode(payload.code)
+          ? payload.code
+          : undefined
+      } catch {
+        // Older kernels return an unstructured error body.
+      }
+      throw new Error(
+        `state returned ${response.status}${failureCode ? ` (${failureCode})` : ''}`,
+      )
     }
     return (await response.json()) as LocalEdgeSnapshot
   } catch (error) {

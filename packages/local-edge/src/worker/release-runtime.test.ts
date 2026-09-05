@@ -58,6 +58,7 @@ vi.mock('./release-metadata.ts', () => ({
   applyLocalEdgeModeIfLatest: vi.fn(async () => ({ applied: true })),
   claimCandidateJournalIfLatest: vi.fn(async () => ({ claimed: true })),
   clearCandidateJournalIfOwned: vi.fn(async () => true),
+  clearLegacyCandidateCleanup: vi.fn(async () => true),
   markCandidateJournalCleaningIfOwned: vi.fn(async () => true),
   readOrCreateMetadataEpoch: vi.fn(async () => 'metadata-epoch-test'),
   readReleaseState: vi.fn(async () => ({ retained: [] })),
@@ -65,6 +66,7 @@ vi.mock('./release-metadata.ts', () => ({
     localEdgeEnabled: true,
     releaseState: { retained: [] },
   })),
+  readLegacyCandidateCleanup: vi.fn(async () => undefined),
   readClientReleasePins: vi.fn(async () => new Map()),
   updateClientReleasePin: vi.fn(async () => new Map()),
   pruneClientReleasePins: vi.fn(async () => new Map()),
@@ -159,6 +161,28 @@ describe('release-runtime candidate install progress', () => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
     vi.resetModules()
+  })
+
+  it('cleans a migrated legacy candidate before serving a restarted global', async () => {
+    const metadata = await import('./release-metadata.ts')
+    const releaseId = 'legacy-candidate'
+    cacheStore.set(
+      `fwa-local-edge:local-edge-package-test:release:${releaseId}`,
+      new Map(),
+    )
+    vi.mocked(metadata.readLegacyCandidateCleanup)
+      .mockResolvedValueOnce(releaseId)
+      .mockResolvedValueOnce(releaseId)
+
+    await runtime.getLocalEdgeSnapshot()
+
+    expect(caches.delete).toHaveBeenCalledWith(
+      `fwa-local-edge:local-edge-package-test:release:${releaseId}`,
+    )
+    expect(metadata.clearLegacyCandidateCleanup).toHaveBeenCalledWith(
+      'metadata-epoch-test',
+      releaseId,
+    )
   })
 
   it('broadcasts progress through the install and a committed message on success', async () => {

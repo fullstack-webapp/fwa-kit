@@ -67,7 +67,22 @@ export function isTrustedResetPost(request: Request) {
   }
 
   if (request.mode === 'navigate') {
-    return origin === worker.location.origin
+    if (origin !== null) {
+      return origin === worker.location.origin
+    }
+    if (fetchSite === 'same-origin') {
+      return true
+    }
+
+    const referer = request.headers.get('Referer')
+    if (referer === null) {
+      return false
+    }
+    try {
+      return new URL(referer).origin === worker.location.origin
+    } catch {
+      return false
+    }
   }
 
   return isTrustedProgrammaticControlPost(request, 'reset')

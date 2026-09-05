@@ -20,11 +20,13 @@ import {
   applyLocalEdgeModeIfLatest,
   claimCandidateJournalIfLatest,
   clearCandidateJournalIfOwned,
+  clearLegacyCandidateCleanup,
   deleteReleaseMetadata,
   markCandidateJournalCleaningIfOwned,
   pruneClientReleasePins,
   readClientReleasePins,
   readKernelSnapshotMetadata,
+  readLegacyCandidateCleanup,
   readLocalEdgeEnabled,
   readOrCreateMetadataEpoch,
   readReleaseState,
@@ -68,6 +70,7 @@ let resetInFlight: Promise<void> | undefined
 let resetObservationReady: Promise<void> | undefined
 let resetStarted = false
 let metadataEpoch: string | undefined
+let metadataRecoveryComplete = false
 const candidateCacheLockName = `fwa-local-edge:${localEdgeConfig.appId}:candidate-cache`
 
 function withCandidateCacheLock<Result>(operation: () => Promise<Result>) {
@@ -557,7 +560,33 @@ async function ensureMetadataAuthority(allowCreate = false) {
   } else if (metadataEpoch !== observedEpoch) {
     throw new Error('release runtime lost metadata authority')
   }
+  if (!metadataRecoveryComplete && navigator.locks) {
+    await cleanupLegacyCandidateAfterMigration()
+    metadataRecoveryComplete = true
+  }
   return metadataEpoch
+}
+
+async function cleanupLegacyCandidateAfterMigration() {
+  const metadataEpoch = requiredMetadataEpoch()
+  if (!(await readLegacyCandidateCleanup(metadataEpoch))) {
+    return
+  }
+
+  await withCandidateCacheLock(async () => {
+    const releaseId = await readLegacyCandidateCleanup(metadataEpoch)
+    if (!releaseId) {
+      return
+    }
+    const releaseState = await readReleaseState(metadataEpoch)
+    const isReferenced =
+      releaseState.active?.releaseId === releaseId ||
+      releaseState.retained.some((release) => release.releaseId === releaseId)
+    if (!isReferenced) {
+      await caches.delete(releaseCacheName(releaseId))
+    }
+    await clearLegacyCandidateCleanup(metadataEpoch, releaseId)
+  })
 }
 
 function requiredMetadataEpoch() {

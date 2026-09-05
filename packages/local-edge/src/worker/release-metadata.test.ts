@@ -1,13 +1,15 @@
 import { IDBFactory } from 'fake-indexeddb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { LegacyAppRelease } from '../release.ts'
+import type { LegacyAppRelease, VerifiedAppRelease } from '../release.ts'
 import {
   allocateReleaseObservation,
   applyLocalEdgeModeIfLatest,
   claimCandidateJournalIfLatest,
+  clearLegacyCandidateCleanup,
   deleteReleaseMetadata,
   normalizeStoredReleaseState,
   readClientReleasePins,
+  readLegacyCandidateCleanup,
   readLocalEdgeEnabled,
   readOrCreateMetadataEpoch,
   readReleaseState,
@@ -25,6 +27,21 @@ const releases = ['a', 'b', 'c', 'd'].map(
     coreAssets: ['/index.html'],
   }),
 )
+
+const productionBeta5Release: VerifiedAppRelease = {
+  schemaVersion: 2,
+  appId: 'local-edge-package-test',
+  releaseId: 'ee4d915ef6de9ec5',
+  appEntry: '/',
+  assets: [
+    {
+      path: '/',
+      mediaType: 'text/html',
+      size: 42,
+      digest: `sha256:${'a'.repeat(64)}`,
+    },
+  ],
+}
 
 describe('normalizeStoredReleaseState', () => {
   it('migrates the legacy previous release into the retained list', () => {
@@ -81,6 +98,88 @@ describe('release metadata authority', () => {
       active: undefined,
       retained: [],
     })
+  })
+
+  it('does not create a missing metadata database while reading', async () => {
+    await expect(readOrCreateMetadataEpoch(false)).rejects.toMatchObject({
+      code: 'metadata-database-missing',
+    })
+    expect(crypto.randomUUID).not.toHaveBeenCalled()
+  })
+
+  it('recovers beta.5-compatible verified release metadata without an epoch', async () => {
+    await writeLegacyMetadata([
+      ['activeRelease', productionBeta5Release],
+      [
+        'clientReleasePins',
+        { 'legacy-client': productionBeta5Release.releaseId },
+      ],
+      ['localEdgeEnabled', true],
+    ])
+
+    const metadataEpoch = await readOrCreateMetadataEpoch(false)
+
+    expect(metadataEpoch).toBe('00000000-0000-4000-8000-000000000001')
+    await expect(readReleaseState(metadataEpoch)).resolves.toEqual({
+      active: productionBeta5Release,
+      retained: [],
+    })
+    await expect(readClientReleasePins(metadataEpoch)).resolves.toEqual(
+      new Map([['legacy-client', productionBeta5Release.releaseId]]),
+    )
+    await expect(readOrCreateMetadataEpoch(false)).resolves.toBe(metadataEpoch)
+  })
+
+  it('clears an ownerless beta.5 candidate journal while migrating', async () => {
+    await writeLegacyMetadata([
+      ['activeRelease', releases[0]],
+      ['candidateJournal', { releaseId: releases[1].releaseId, phase: 'installing' }],
+    ])
+
+    const metadataEpoch = await readOrCreateMetadataEpoch(false)
+    await expect(readLegacyCandidateCleanup(metadataEpoch)).resolves.toBe(
+      releases[1].releaseId,
+    )
+    const observation = await allocateReleaseObservation(metadataEpoch)
+    const owner = {
+      metadataEpoch,
+      kernelInstanceId: '00000000-0000-4000-8000-000000000030',
+      attemptId: 1,
+      releaseId: releases[1].releaseId,
+      releaseObservationSeq: observation.observationSeq,
+    }
+
+    await expect(
+      claimCandidateJournalIfLatest(
+        { ...owner, phase: 'installing' },
+        observation,
+      ),
+    ).resolves.toMatchObject({ claimed: true, previous: undefined })
+    await expect(
+      clearLegacyCandidateCleanup(metadataEpoch, releases[1].releaseId),
+    ).resolves.toBe(true)
+    await expect(readLegacyCandidateCleanup(metadataEpoch)).resolves.toBeUndefined()
+  })
+
+  it('does not treat non-release legacy metadata as authority', async () => {
+    await writeLegacyMetadata([
+      ['clientReleasePins', { 'legacy-client': 'missing-release' }],
+      ['localEdgeEnabled', true],
+    ])
+
+    await expect(readOrCreateMetadataEpoch(false)).rejects.toThrow(
+      'metadata epoch is unavailable',
+    )
+    expect(crypto.randomUUID).not.toHaveBeenCalled()
+  })
+
+  it('does not turn an existing empty database into post-reset authority', async () => {
+    await writeLegacyMetadata([])
+
+    await expect(readOrCreateMetadataEpoch(false)).rejects.toThrow(
+      'metadata epoch is unavailable',
+    )
+    expect(crypto.randomUUID).not.toHaveBeenCalled()
   })
 
   it('permanently rejects an old epoch after reset and bootstrap', async () => {
@@ -216,3 +315,33 @@ describe('release metadata authority', () => {
     )
   })
 })
+
+function writeLegacyMetadata(entries: readonly (readonly [IDBValidKey, unknown])[]) {
+  return new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open('fwa-local-edge:local-edge-package-test', 1)
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore('metadata')
+    }
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => {
+      const database = request.result
+      const transaction = database.transaction('metadata', 'readwrite')
+      const store = transaction.objectStore('metadata')
+      for (const [key, value] of entries) {
+        store.put(value, key)
+      }
+      transaction.oncomplete = () => {
+        database.close()
+        resolve()
+      }
+      transaction.onerror = () => {
+        database.close()
+        reject(transaction.error)
+      }
+      transaction.onabort = () => {
+        database.close()
+        reject(transaction.error)
+      }
+    }
+  })
+}

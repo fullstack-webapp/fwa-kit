@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   fwaKernelIdentityHeadersFor,
+  isFwaKernelSnapshotFailureCode,
   localEdgeControlPathsFor,
   defineLocalEdgeConfig,
   defaultUpdateCheckIntervalMinutes,
@@ -38,6 +39,15 @@ describe('defineLocalEdgeConfig', () => {
       'X-FWA-Kernel': '/app/worker.js',
       'X-FWA-Kernel-Protocol': '2',
     })
+  })
+
+  it('bounds kernel snapshot failure codes shared by worker and loader', () => {
+    expect(isFwaKernelSnapshotFailureCode('metadata-database-missing')).toBe(true)
+    expect(isFwaKernelSnapshotFailureCode('metadata-epoch-missing')).toBe(true)
+    expect(isFwaKernelSnapshotFailureCode('kernel-snapshot-failed')).toBe(true)
+    expect(isFwaKernelSnapshotFailureCode('private implementation detail')).toBe(
+      false,
+    )
   })
 
   it('accepts a non-root scope and derives custom control paths', () => {
