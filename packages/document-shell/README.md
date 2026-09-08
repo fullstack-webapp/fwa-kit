@@ -155,6 +155,18 @@ The commit waits for that gate, marks `<html data-app-ready="true">`, removes
 the element carrying `data-document-shell-static`, and always fails open so a
 broken stylesheet cannot leave a permanent overlay.
 
+A consumer whose static projection reveals delayed content (for example a
+content placeholder that only appears after a short race with the runtime and
+then stays visible for a minimum duration) can declare an absolute
+reveal-not-before deadline on the projection element via the exported
+`documentShellRevealNotBeforeAttribute` at the moment that content becomes
+visible. The loaded handoff then waits until the deadline before writing
+`data-app-ready` and removing the projection. Only a finite, future deadline
+that is still inside both the package's bounded hold horizon and the runtime
+stylesheet gate's recorded fail-open deadline is honored; absent, invalid, or
+expired declarations leave the loaded handoff immediate, and stylesheet `error`, `timeout`, and absence always reveal
+immediately. See the integration guide for the declaration contract.
+
 For the full file-by-file procedure, safe-area effect example, verification
 checklist, and failure guide, see [Integration guide](docs/integration.md).
 
@@ -164,7 +176,7 @@ checklist, and failure guide, see [Integration guide](docs/integration.md).
 | --- | --- |
 | `@fullstack-webapp/document-shell` | Typed HTML/CSS/script boundaries, document composition types, compiler, structural validation, and the shared-default safe-area bridge. |
 | `@fullstack-webapp/document-shell/vite` | The Vite HTML producer, optional runtime-stylesheet gate, and final emitted-document validator. |
-| `@fullstack-webapp/document-shell/client` | The framework-neutral, one-shot runtime handoff. |
+| `@fullstack-webapp/document-shell/client` | The framework-neutral, one-shot runtime handoff and its package-owned DOM contracts, including the optional reveal-not-before deadline. |
 | `@fullstack-webapp/document-shell/reference` | Reference-application safe-area rollout used to retain existing evidence while profiles mature; it is not a consumer profile selector. |
 
 The current beta catalog projects all four accepted iOS standalone portrait
@@ -213,6 +225,10 @@ an arbitrary callback with `Function#toString()`.
 - The current safe-area runtime matches observable browser geometry and
   platform signals, not marketing device names. Unsupported geometry fails
   open and receives no reserve.
+- A reveal-not-before declaration can delay only a stylesheet `loaded`
+  handoff, and never past the runtime stylesheet gate's recorded fail-open
+  deadline; `error`, `timeout`, and `absent` outcomes and missing, invalid, or
+  expired declarations keep the immediate fail-open behavior.
 
 ## Development
 
