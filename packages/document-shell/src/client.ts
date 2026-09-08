@@ -63,6 +63,14 @@ export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult
     stylesheet?.removeEventListener('load', handleLoad)
     stylesheet?.removeEventListener('error', handleError)
   }
+  const commitReveal = (stylesheetStatus: DocumentShellHandoffResult['stylesheet']) => {
+    if (finished) return
+    finished = true
+    cleanup()
+    root.setAttribute(documentShellReadyAttribute, 'true')
+    document.querySelector(`[${documentShellStaticAttribute}]`)?.remove()
+    resolveHandoff({ status: 'revealed', stylesheet: stylesheetStatus })
+  }
   const reveal = (stylesheetStatus: DocumentShellHandoffResult['stylesheet']) => {
     if (finished) return
     if (stylesheetStatus === 'loaded') {
@@ -72,11 +80,7 @@ export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult
         return
       }
     }
-    finished = true
-    cleanup()
-    root.setAttribute(documentShellReadyAttribute, 'true')
-    document.querySelector(`[${documentShellStaticAttribute}]`)?.remove()
-    resolveHandoff({ status: 'revealed', stylesheet: stylesheetStatus })
+    commitReveal(stylesheetStatus)
   }
   const revealAfterStylesApply = () => {
     if (finished || pending.revealFrame !== undefined) return
@@ -144,25 +148,29 @@ export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult
   }
 
   /**
-   * Defers the loaded reveal until the declared deadline. The fired hold timer
-   * is cleared before re-evaluation so an early fire (clock still before the
-   * deadline) reschedules instead of revealing early or leaving a stale
-   * pending timer behind. The hold timer lives in the same `pending` set as
-   * the other timers and is cancelled by the single `cleanup()` owner, so an
-   * `error`/`timeout`/`absent` reveal that somehow arrives while a hold is
-   * pending still cancels it and fails open.
+   * Defers the loaded reveal until the declared deadline. Wall-clock time
+   * preserves the absolute deadline during normal operation, while a monotonic
+   * ceiling limits the wait to the delay accepted when it was scheduled. The
+   * fired timer is cleared before re-evaluation so an early fire reschedules;
+   * a backward wall-clock adjustment cannot extend the inert projection beyond
+   * the original bounded delay. The timer shares the handoff cleanup lifecycle.
    */
   function scheduleRevealHold(deadline: number) {
     if (pending.holdTimer !== undefined) return
+    const maximumDelay = Math.max(0, deadline - Date.now())
+    const monotonicDeadline = window.performance.now() + maximumDelay
     const wait = () => {
       pending.holdTimer = undefined
-      const remaining = deadline - Date.now()
+      const remaining = Math.min(
+        deadline - Date.now(),
+        monotonicDeadline - window.performance.now(),
+      )
       if (remaining > 0) {
         pending.holdTimer = window.setTimeout(wait, remaining)
         return
       }
-      reveal('loaded')
+      commitReveal('loaded')
     }
-    pending.holdTimer = window.setTimeout(wait, Math.max(0, deadline - Date.now()))
+    pending.holdTimer = window.setTimeout(wait, maximumDelay)
   }
 }

@@ -18,9 +18,10 @@ after(() => {
 })
 
 function installDocument(stylesheetState: StylesheetFixtureState = 'pending') {
-  // Deterministic clock: hold timers fire at the fixture's discretion, so the
-  // client re-reads `Date.now()` to decide whether a held deadline elapsed.
+  // Deterministic wall and monotonic clocks let hold timers fire at the
+  // fixture's discretion while preserving the client's two clock contracts.
   let now = realDateNow()
+  let monotonicNow = 0
   Date.now = () => now
   const attributes = new Map<string, string>()
   const projectionAttributes = new Map<string, string>()
@@ -66,6 +67,11 @@ function installDocument(stylesheetState: StylesheetFixtureState = 'pending') {
     },
   } as unknown as Document
   const fakeWindow = {
+    performance: {
+      now() {
+        return monotonicNow
+      },
+    },
     cancelAnimationFrame() {},
     clearTimeout(timer: number) {
       clearedTimers.push(timer)
@@ -85,8 +91,15 @@ function installDocument(stylesheetState: StylesheetFixtureState = 'pending') {
   Object.defineProperty(globalThis, 'window', { configurable: true, value: fakeWindow })
 
   return {
+    adjustWall(milliseconds: number) {
+      now += milliseconds
+    },
     advance(milliseconds: number) {
       now += milliseconds
+      monotonicNow += milliseconds
+    },
+    advanceMonotonic(milliseconds: number) {
+      monotonicNow += milliseconds
     },
     attributes,
     clearedTimers,
@@ -165,6 +178,21 @@ test('holds a loaded reveal until a declared future deadline and reveals once', 
   assert.deepEqual(await handoff, { status: 'revealed', stylesheet: 'loaded' })
   assert.equal(commitDocumentShellRuntime(), handoff)
   assert.equal(runtime.removed(), 1)
+})
+
+test('bounds a hold by monotonic elapsed time when the wall clock moves backward', async () => {
+  const runtime = installDocument('loaded')
+  runtime.setDeadline(runtime.now() + 800)
+  const handoff = commitDocumentShellRuntime()
+
+  runtime.adjustWall(-500)
+  runtime.advanceMonotonic(801)
+  runtime.fireTimer(1)
+
+  assert.deepEqual(await handoff, { status: 'revealed', stylesheet: 'loaded' })
+  assert.equal(runtime.attributes.get(documentShellReadyAttribute), 'true')
+  assert.equal(runtime.removed(), 1)
+  assert.equal(runtime.timerCount(), 0)
 })
 
 test('honors a deadline declared after load but before the apply frame', async () => {

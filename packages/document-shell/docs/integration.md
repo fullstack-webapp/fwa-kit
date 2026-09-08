@@ -273,7 +273,9 @@ Semantics:
 - The wait is a package timer with the same cleanup lifecycle as the rest of
   the handoff. Repeated `commitDocumentShellRuntime()` calls return the same
   document-level promise and never create a second timer, and the projection is
-  still removed exactly once.
+  still removed exactly once. The absolute wall-clock deadline is also bounded
+  by the monotonic delay accepted when scheduling, so moving the system clock
+  backward cannot extend the hold indefinitely.
 
 The bounded rule keeps the existing fail-open guarantee intact: an inert
 projection can never outlive the runtime stylesheet gate, so a malformed or
