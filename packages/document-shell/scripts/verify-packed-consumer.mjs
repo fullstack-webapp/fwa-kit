@@ -75,6 +75,7 @@ try {
     `import { documentShell } from '@fullstack-webapp/document-shell/vite'\n` +
     `import { htmlFragment, cssText } from '@fullstack-webapp/document-shell'\n` +
     `import { createSafeAreaBridge } from '@fullstack-webapp/document-shell'\n` +
+    `import { documentShellRevealNotBeforeAttribute } from '@fullstack-webapp/document-shell/client'\n` +
     `import { defineConfig } from 'vite'\n` +
     `\n` +
     `export default defineConfig({\n` +
@@ -106,6 +107,9 @@ try {
     `                  reserveAttribute: 'data-consumer-safe-area-reserve',\n` +
     `                },\n` +
     `              }).beforePaint },\n` +
+    `            ],\n` +
+    `            afterShell: [\n` +
+    `              htmlFragment('<script data-reveal-declarer="true">(()=>{const projection=document.querySelector("[data-document-shell-static]");if(projection)projection.setAttribute("' + documentShellRevealNotBeforeAttribute + '",String(Date.now()+400))})()</script>'),\n` +
     `            ],\n` +
     `          },\n` +
     `        }\n` +
@@ -140,6 +144,7 @@ try {
   assert(rebuiltIndex.includes('id="runtime-stylesheet"'), 'final index lacks the deferred runtime stylesheet id')
   assert(rebuiltIndex.includes('data-document-shell-runtime-stylesheet="true"'), 'final index lacks the runtime stylesheet bootstrap')
   assert(rebuiltIndex.includes('data-document-shell-static="true"'), 'final index lacks the static shell marker')
+  assert(rebuiltIndex.includes('data-document-shell-reveal-not-before'), 'final index lacks the reveal-not-before declaration seam')
   assert(!rebuiltIndex.includes('data-document-shell-entry'), 'final index still contains the template marker')
 
   run(node, ['--input-type=module', '-e', packedNodeImportCheck()], { cwd: consumerRoot })
@@ -158,6 +163,8 @@ import * as vite from '@fullstack-webapp/document-shell/vite'
 assert.equal(typeof root.compileDocumentShell, 'function')
 assert.equal(typeof root.createSafeAreaBridge, 'function')
 assert.equal(typeof client.commitDocumentShellRuntime, 'function')
+assert.equal(typeof client.documentShellRevealNotBeforeAttribute, 'string')
+assert.ok(client.documentShellRevealNotBeforeAttribute.startsWith('data-'))
 assert.equal(typeof reference.createReferenceSafeAreaBridge, 'function')
 assert.equal(typeof vite.documentShell, 'function')
 console.log('[document-shell] packed node import smoke passed')

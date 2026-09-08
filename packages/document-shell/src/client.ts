@@ -1,6 +1,16 @@
 export const documentShellReadyAttribute = 'data-app-ready'
 export const documentShellStaticAttribute = 'data-document-shell-static'
 export const documentShellRuntimeStylesheetId = 'runtime-stylesheet'
+/**
+ * Runtime-declared reveal-not-before deadline. The consumer's parser startup
+ * effect writes an absolute epoch-millisecond deadline into this attribute on
+ * the element carrying {@link documentShellStaticAttribute} at the moment the
+ * projection's delayed content actually becomes visible. A loaded stylesheet
+ * handoff waits until that deadline before writing `data-app-ready` and
+ * removing the projection; absent, invalid, or expired deadlines leave the
+ * loaded handoff immediate, and `error`/`timeout`/`absent` always fail open.
+ */
+export const documentShellRevealNotBeforeAttribute = 'data-document-shell-reveal-not-before'
 
 export type DocumentShellHandoffResult = Readonly<{
   status: 'revealed'
@@ -8,6 +18,13 @@ export type DocumentShellHandoffResult = Readonly<{
 }>
 
 const handoffs = new WeakMap<Document, Promise<DocumentShellHandoffResult>>()
+
+/**
+ * Defensive bound when the runtime stylesheet bootstrap record is absent: the
+ * package mirrors the stylesheet gate's absolute deadline with a horizon from
+ * the current time so a malformed declaration can never pin the projection.
+ */
+const revealHoldHorizonMs = 3_000
 
 export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult> {
   if (typeof document === 'undefined') {
@@ -28,11 +45,19 @@ export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult
     documentShellRuntimeStylesheetId,
   ) as HTMLLinkElement | null
   let finished = false
-  const pending: { revealFrame?: number; fallbackTimer?: number } = {}
+  const pending: {
+    holdTimer?: number
+    revealFrame?: number
+    fallbackTimer?: number
+  } = {}
 
   root.setAttribute('data-document-shell-runtime-committed', 'true')
 
   const cleanup = () => {
+    if (pending.holdTimer !== undefined) {
+      window.clearTimeout(pending.holdTimer)
+      pending.holdTimer = undefined
+    }
     if (pending.fallbackTimer !== undefined) window.clearTimeout(pending.fallbackTimer)
     if (pending.revealFrame !== undefined) window.cancelAnimationFrame(pending.revealFrame)
     stylesheet?.removeEventListener('load', handleLoad)
@@ -40,6 +65,13 @@ export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult
   }
   const reveal = (stylesheetStatus: DocumentShellHandoffResult['stylesheet']) => {
     if (finished) return
+    if (stylesheetStatus === 'loaded') {
+      const holdUntil = readRevealNotBeforeDeadline()
+      if (holdUntil !== null) {
+        scheduleRevealHold(holdUntil)
+        return
+      }
+    }
     finished = true
     cleanup()
     root.setAttribute(documentShellReadyAttribute, 'true')
@@ -87,4 +119,50 @@ export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult
   pending.fallbackTimer = window.setTimeout(() => reveal('timeout'), fallbackDelay)
 
   return handoff
+
+  /**
+   * Reads the reveal-not-before declaration at the moment the loaded handoff
+   * is about to reveal, so a deadline declared while the stylesheet was still
+   * loading is honored. Only a finite absolute deadline that is strictly in
+   * the future and still inside the runtime stylesheet gate's recorded
+   * fail-open deadline is honored; every other value is treated as absent or
+   * expired, keeping the loaded handoff immediate and guaranteeing that the
+   * projection can never outlive the stylesheet gate.
+   */
+  function readRevealNotBeforeDeadline(): number | null {
+    const projection = document.querySelector(`[${documentShellStaticAttribute}]`)
+    const raw = projection?.getAttribute(documentShellRevealNotBeforeAttribute)
+    if (!raw) return null
+    const deadline = Number(raw)
+    const now = Date.now()
+    if (!Number.isFinite(deadline) || deadline <= now) return null
+    const gateDeadline = Number(stylesheet?.dataset.failureDeadline)
+    const ceiling = Number.isFinite(gateDeadline)
+      ? gateDeadline
+      : now + revealHoldHorizonMs
+    return deadline <= ceiling ? deadline : null
+  }
+
+  /**
+   * Defers the loaded reveal until the declared deadline. The fired hold timer
+   * is cleared before re-evaluation so an early fire (clock still before the
+   * deadline) reschedules instead of revealing early or leaving a stale
+   * pending timer behind. The hold timer lives in the same `pending` set as
+   * the other timers and is cancelled by the single `cleanup()` owner, so an
+   * `error`/`timeout`/`absent` reveal that somehow arrives while a hold is
+   * pending still cancels it and fails open.
+   */
+  function scheduleRevealHold(deadline: number) {
+    if (pending.holdTimer !== undefined) return
+    const wait = () => {
+      pending.holdTimer = undefined
+      const remaining = deadline - Date.now()
+      if (remaining > 0) {
+        pending.holdTimer = window.setTimeout(wait, remaining)
+        return
+      }
+      reveal('loaded')
+    }
+    pending.holdTimer = window.setTimeout(wait, Math.max(0, deadline - Date.now()))
+  }
 }

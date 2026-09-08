@@ -179,6 +179,107 @@ The resolved result records whether the runtime stylesheet was `loaded`,
 `error`, `timeout`, or `absent`. Every result is a revealed state. Error and
 timeout are fail-open outcomes, not thrown errors.
 
+### Declare a reveal-not-before deadline (optional)
+
+A projection may reveal part of its content only after a short race with the
+runtime, then keep that delayed content visible for a minimum duration. CSS can
+delay the delayed content's appearance, but it cannot stop the loaded handoff
+from removing the whole projection mid-duration. For that surface the consumer
+declares an absolute reveal-not-before deadline on the static projection at the
+moment the delayed content actually becomes visible; the loaded handoff then
+waits until that deadline before writing the readiness attribute and removing
+the projection.
+
+The deadline is a package-owned DOM contract, not a hand-written attribute:
+
+```ts
+import {
+  commitDocumentShellRuntime,
+  documentShellRevealNotBeforeAttribute,
+} from '@fullstack-webapp/document-shell/client'
+```
+
+The consumer's parser startup effect writes an absolute epoch-millisecond
+deadline (`Date.now() + minimumVisibleMs`) into
+`documentShellRevealNotBeforeAttribute` on the element carrying
+`data-document-shell-static`. Declare it only when the delayed content is
+actually visible: when the runtime won the race and the projection was already
+revealed, there is nothing to hold, and a later declaration is simply too late.
+A minimal runtime effect, composed by the renderer, can look like this:
+
+```ts
+import {
+  cssText,
+  htmlFragment,
+  inlineScript,
+  type DocumentShellComposition,
+} from '@fullstack-webapp/document-shell'
+import { documentShellRevealNotBeforeAttribute } from '@fullstack-webapp/document-shell/client'
+
+const revealDelayMs = 150        // surface policy, chosen by the consumer
+const minimumVisibleMs = 250     // surface policy, chosen by the consumer
+
+const composition: DocumentShellComposition = {
+  // ...
+  startupEffects: {
+    beforePaint: [
+      {
+        marker: 'data-reveal-declarer',
+        script: inlineScript(`
+          (() => {
+            const revealDelay = ${revealDelayMs}
+            const minimumVisible = ${minimumVisibleMs}
+            const selector = '[data-document-shell-static]'
+            setTimeout(() => {
+              const projection = document.querySelector(selector)
+              // Still projected at the reveal-delay boundary means the delayed
+              // content is becoming visible now: keep it for its minimum
+              // visible duration before the handoff may reveal.
+              if (projection) {
+                projection.setAttribute(
+                  '${documentShellRevealNotBeforeAttribute}',
+                  String(Date.now() + minimumVisible),
+                )
+              }
+            }, revealDelay)
+          })()
+        `),
+      },
+    ],
+  },
+}
+```
+
+The values shown are examples; the delay and the minimum visible duration are
+consumer surface policy and belong to the surface that owns the pending
+experience, not to Document Shell.
+
+Semantics:
+
+- Only a normal stylesheet `loaded` handoff can wait for a deadline.
+  Stylesheet `error`, `timeout`, and absence keep their immediate fail-open
+  reveal and are never blocked by a declaration.
+- The package honors a declaration only when it is a finite absolute timestamp,
+  strictly after the current time, and no later than the runtime stylesheet
+  gate's recorded fail-open deadline (the same absolute deadline that already
+  bounds the whole handoff). Every other value — absent, non-numeric, zero,
+  negative, `Infinity`, expired, or too far in the future — is treated as
+  expired, and the loaded handoff reveals immediately exactly as without a
+  declaration.
+- The deadline is sampled when the loaded reveal is about to run. A
+  declaration that lands while the stylesheet is still loading or between the
+  load event and the apply frame is honored; a declaration that lands after the
+  reveal already ran cannot resurrect the projection.
+- The wait is a package timer with the same cleanup lifecycle as the rest of
+  the handoff. Repeated `commitDocumentShellRuntime()` calls return the same
+  document-level promise and never create a second timer, and the projection is
+  still removed exactly once.
+
+The bounded rule keeps the existing fail-open guarantee intact: an inert
+projection can never outlive the runtime stylesheet gate, so a malformed or
+mistaken declaration cannot pin the overlay past the point the package would
+otherwise have released it.
+
 ## 6. Keep static and runtime geometry identical
 
 The most common integration defect is not lifecycle; it is two shells using
@@ -322,6 +423,23 @@ links in `document.head` while this beta limitation applies.
 The commit hook is mounted too early, or a consumer reimplemented the handoff.
 Place it inside the persistent runtime shell and call only
 `commitDocumentShellRuntime()`.
+
+### A delayed projection disappears before its minimum visible duration ends
+
+The delayed content's appearance is timed with CSS, but the loaded handoff
+still removes the projection as soon as the stylesheet applied. Declare a
+reveal-not-before deadline (see the optional seam above) at the moment the
+delayed content becomes visible instead of adding a competing timer in the
+framework hook.
+
+### A declared reveal-not-before deadline never seems to hold
+
+The declaration must live on the element carrying `data-document-shell-static`
+as `documentShellRevealNotBeforeAttribute`, hold an absolute epoch-millisecond
+timestamp that is still inside the runtime stylesheet gate, and land before the
+loaded reveal runs. A static far-future value in the emitted HTML is ignored by
+design so it cannot pin the overlay; declare it from the startup effect when
+the delayed content is actually visible.
 
 ### Icons, labels, active state, or tab-bar height still move
 
