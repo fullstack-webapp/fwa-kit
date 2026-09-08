@@ -260,9 +260,10 @@ Semantics:
   Stylesheet `error`, `timeout`, and absence keep their immediate fail-open
   reveal and are never blocked by a declaration.
 - The package honors a declaration only when it is a finite absolute timestamp,
-  strictly after the current time, and no later than the runtime stylesheet
-  gate's recorded fail-open deadline (the same absolute deadline that already
-  bounds the whole handoff). Every other value — absent, non-numeric, zero,
+  strictly after the current time, within the package's three-second defensive
+  hold horizon, and no later than the runtime stylesheet gate's recorded
+  fail-open deadline (the same absolute deadline that already bounds the whole
+  handoff). Every other value — absent, non-numeric, zero,
   negative, `Infinity`, expired, or too far in the future — is treated as
   expired, and the loaded handoff reveals immediately exactly as without a
   declaration.
@@ -438,9 +439,9 @@ framework hook.
 
 The declaration must live on the element carrying `data-document-shell-static`
 as `documentShellRevealNotBeforeAttribute`, hold an absolute epoch-millisecond
-timestamp that is still inside the runtime stylesheet gate, and land before the
-loaded reveal runs. A static far-future value in the emitted HTML is ignored by
-design so it cannot pin the overlay; declare it from the startup effect when
+timestamp inside both the bounded hold horizon and the runtime stylesheet gate,
+and land before the loaded reveal runs. A static far-future value in the emitted
+HTML is ignored by design so it cannot pin the overlay; declare it from the startup effect when
 the delayed content is actually visible.
 
 ### Icons, labels, active state, or tab-bar height still move

@@ -162,9 +162,9 @@ reveal-not-before deadline on the projection element via the exported
 `documentShellRevealNotBeforeAttribute` at the moment that content becomes
 visible. The loaded handoff then waits until the deadline before writing
 `data-app-ready` and removing the projection. Only a finite, future deadline
-that is still inside the runtime stylesheet gate's recorded fail-open deadline
-is honored; absent, invalid, or expired declarations leave the loaded handoff
-immediate, and stylesheet `error`, `timeout`, and absence always reveal
+that is still inside both the package's bounded hold horizon and the runtime
+stylesheet gate's recorded fail-open deadline is honored; absent, invalid, or
+expired declarations leave the loaded handoff immediate, and stylesheet `error`, `timeout`, and absence always reveal
 immediately. See the integration guide for the declaration contract.
 
 For the full file-by-file procedure, safe-area effect example, verification

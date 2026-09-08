@@ -195,6 +195,19 @@ test('bounds a hold by monotonic elapsed time when the wall clock moves backward
   assert.equal(runtime.timerCount(), 0)
 })
 
+test('rejects a rollback-inflated delay before a hold is scheduled', async () => {
+  const runtime = installDocument('loaded')
+  runtime.setDeadline(runtime.now() + 800)
+  runtime.adjustWall(-60_000)
+
+  const handoff = commitDocumentShellRuntime()
+
+  assert.deepEqual(await handoff, { status: 'revealed', stylesheet: 'loaded' })
+  assert.equal(runtime.attributes.get(documentShellReadyAttribute), 'true')
+  assert.equal(runtime.removed(), 1)
+  assert.equal(runtime.timerCount(), 0)
+})
+
 test('honors a deadline declared after load but before the apply frame', async () => {
   const runtime = installDocument()
   const handoff = commitDocumentShellRuntime()

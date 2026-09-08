@@ -20,9 +20,10 @@ export type DocumentShellHandoffResult = Readonly<{
 const handoffs = new WeakMap<Document, Promise<DocumentShellHandoffResult>>()
 
 /**
- * Defensive bound when the runtime stylesheet bootstrap record is absent: the
- * package mirrors the stylesheet gate's absolute deadline with a horizon from
- * the current time so a malformed declaration can never pin the projection.
+ * Maximum wall-clock horizon accepted for an optional reveal hold. The
+ * stylesheet bootstrap normally supplies the same three-second gate, while
+ * this independent bound also survives wall-clock adjustments between the
+ * declaration and the loaded handoff.
  */
 const revealHoldHorizonMs = 3_000
 
@@ -141,9 +142,10 @@ export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult
     const now = Date.now()
     if (!Number.isFinite(deadline) || deadline <= now) return null
     const gateDeadline = Number(stylesheet?.dataset.failureDeadline)
-    const ceiling = Number.isFinite(gateDeadline)
-      ? gateDeadline
-      : now + revealHoldHorizonMs
+    const ceiling = Math.min(
+      now + revealHoldHorizonMs,
+      Number.isFinite(gateDeadline) ? gateDeadline : Number.POSITIVE_INFINITY,
+    )
     return deadline <= ceiling ? deadline : null
   }
 
@@ -157,7 +159,10 @@ export function commitDocumentShellRuntime(): Promise<DocumentShellHandoffResult
    */
   function scheduleRevealHold(deadline: number) {
     if (pending.holdTimer !== undefined) return
-    const maximumDelay = Math.max(0, deadline - Date.now())
+    const maximumDelay = Math.min(
+      revealHoldHorizonMs,
+      Math.max(0, deadline - Date.now()),
+    )
     const monotonicDeadline = window.performance.now() + maximumDelay
     const wait = () => {
       pending.holdTimer = undefined
