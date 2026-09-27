@@ -39,6 +39,7 @@
     "src/release.ts",
     "src/revalidation-observation.ts",
     "src/route-policy.ts",
+    "src/loader/command-dispatch.ts",
     "src/loader/debug-installation.ts",
     "src/loader/debug-panel.ts",
     "src/loader/debug-position.ts",

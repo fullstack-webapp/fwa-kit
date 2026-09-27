@@ -3,7 +3,7 @@ import {
   fwaTakeoverMessageType,
   localEdgeConfig,
 } from '../config.ts'
-import { isValidUpdateCheckIntervalMinutes } from '../config-contract.ts'
+import { applyQueuedUrlWriters, dispatchCommand } from './command-dispatch.ts'
 import { createFwaDebugRuntime } from './debug-runtime.ts'
 import {
   deriveFwaLoaderPaths,
@@ -113,6 +113,7 @@ function bootstrap(script: HTMLScriptElement) {
 
   fwa.version = fwaLoaderVersion
   fwa.localEdge = localEdge
+  applyQueuedUrlWriters(fwa.q, debug)
   debug.start()
   installCommandQueue(fwa, localEdge)
   runtime.start()
@@ -150,70 +151,4 @@ function installCommandQueue(fwa: FwaGlobal, localEdgeApi: FwaLocalEdgeApi) {
   for (const command of queuedCommands) {
     dispatchCommand(localEdgeApi, command)
   }
-}
-
-function dispatchCommand(localEdgeApi: FwaLocalEdgeApi, command: unknown) {
-  if (!Array.isArray(command)) {
-    return
-  }
-
-  const [name, argument] = command
-  switch (name) {
-    case 'localEdge.getState':
-      if (typeof argument === 'function') {
-        argument(localEdgeApi.getState())
-      }
-      break
-    case 'localEdge.subscribe':
-      if (typeof argument === 'function') {
-        localEdgeApi.subscribe(argument)
-      }
-      break
-    case 'localEdge.revalidate':
-      void localEdgeApi.revalidate().catch(() => undefined)
-      break
-    case 'localEdge.setUpdateCheck':
-      if (isUpdateCheckCommandConfig(argument)) {
-        localEdgeApi.setUpdateCheck(argument)
-      }
-      break
-    case 'localEdge.applyUpdate':
-      localEdgeApi.applyUpdate()
-      break
-    case 'localEdge.reset':
-      void localEdgeApi.reset().catch(() => undefined)
-      break
-    case 'localEdge.openNetwork':
-      localEdgeApi.openNetwork()
-      break
-    case 'debug.getState':
-      if (typeof argument === 'function') {
-        argument(localEdgeApi.debug.getState())
-      }
-      break
-    case 'debug.subscribe':
-      if (typeof argument === 'function') {
-        localEdgeApi.debug.subscribe(argument)
-      }
-      break
-    case 'debug.setEnabled':
-      if (typeof argument === 'boolean') {
-        localEdgeApi.debug.setEnabled(argument)
-      }
-      break
-  }
-}
-
-function isUpdateCheckCommandConfig(
-  value: unknown,
-): value is { enabled?: boolean; intervalMinutes?: number } {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false
-  }
-  const { enabled, intervalMinutes } = value as Record<string, unknown>
-  return (
-    (enabled === undefined || typeof enabled === 'boolean') &&
-    (intervalMinutes === undefined ||
-      isValidUpdateCheckIntervalMinutes(intervalMinutes))
-  )
 }

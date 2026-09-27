@@ -57,6 +57,7 @@ unsubscribe?.()
 | `openNetwork()` | Navigate to `networkUrl()` |
 | `paths` | Read the derived scope, worker, descriptor, and control paths |
 | `debug.*` | Read, subscribe to, and change diagnostics state without navigation |
+| `debug.setUrlWriter(writer)` | Register how `__fwa_debug` is removed from the URL after a diagnostics change; `null` restores the default |
 
 The browser fallback renders reset as a same-origin form navigation. The kernel accepts an exact same-origin `Origin`; for navigation POSTs where iOS omits `Origin`, it accepts browser-controlled `Sec-Fetch-Site: same-origin`, or an exact same-origin `Referer` only when stronger provenance headers are absent. Explicit cross-site fetch metadata, foreign or opaque origins, and provenance-free requests remain forbidden. Programmatic reset continues to require the `X-FWA-Control: reset` header in addition to same-origin request provenance.
 
@@ -65,6 +66,21 @@ A failed `/__fwa/state` response keeps a stable generic message and may include 
 An `updated` result never announces from the response payload: every successful level-2 revalidation response pulls the kernel's state endpoint through the same ordered chain as terminal-message pulls, so the projection reflects the kernel's current active release and a commit that landed in another tab while the response was pending cannot be overwritten by the older release the result carries. If every bounded pull attempt is overtaken by a newer accepted observation, the loader preserves that newer state and defers release projection instead of reporting a false failure; a later terminal event or scheduled pull retries recovery. The silent first-install (`installed`/`enabled`) claim derives from the same ordered fresh-snapshot read. All kernel-observation reads — startup, controller-change, response-driven, and terminal-message pulls — share this ordering, so an older fetch can never overwrite a newer observation. A transient startup snapshot failure may publish an error, but it does not disable scheduled, visibility, or online recovery checks for the document.
 
 The package client entry exports the same facade through `getFwaLocalEdge()` without adding framework state or lifecycle ownership.
+
+## URL ownership
+
+The loader does not rewrite the application URL at startup, so `__fwa_debug=1` and `__fwa_debug=0` stay visible to the page until diagnostics change. The one exception is `__fwa_debug=reset`: the loader consumes it during startup, before the application has run. A writer queued with `['debug.setUrlWriter', writer]` before the loader executes is applied first and performs that removal; otherwise it is a direct `history.replaceState`. A writer registered through the facade after startup only applies to later changes. When diagnostics are later enabled or disabled through `debug.setEnabled` or the diagnostics panel, the loader removes `__fwa_debug` from the current URL without adding a history entry.
+
+By default that removal calls `history.replaceState` directly. An application whose router or navigation runtime is the only history writer registers its own writer instead:
+
+```ts
+getFwaLocalEdge()?.debug.setUrlWriter((url) => {
+  // `url` is the same-origin path, search, and hash without `__fwa_debug`.
+  router.replace(url)
+})
+```
+
+The writer receives the target as `pathname + search + hash` and must replace the current entry synchronously. Its return value is ignored; if it throws or returns a rejected promise, the diagnostics state and stored preference still change and only the URL keeps the stale parameter. Passing `null` restores the direct write; any other non-function value is ignored.
 
 ## Command queue
 
@@ -82,7 +98,7 @@ Commands may be queued before the loader executes:
 </script>
 ```
 
-Supported Local Edge commands mirror the facade methods: `localEdge.getState`, `localEdge.subscribe`, `localEdge.revalidate`, `localEdge.setUpdateCheck`, `localEdge.applyUpdate`, `localEdge.reset`, and `localEdge.openNetwork`. Diagnostics commands remain under `debug.*`.
+Supported Local Edge commands mirror the facade methods: `localEdge.getState`, `localEdge.subscribe`, `localEdge.revalidate`, `localEdge.setUpdateCheck`, `localEdge.applyUpdate`, `localEdge.reset`, and `localEdge.openNetwork`. Diagnostics commands remain under `debug.*`: `debug.getState`, `debug.subscribe`, `debug.setEnabled`, and `debug.setUrlWriter`.
 
 ## Update state
 
