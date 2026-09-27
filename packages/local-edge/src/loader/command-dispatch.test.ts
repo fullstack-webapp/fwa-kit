@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { dispatchCommand } from './command-dispatch.ts'
+import { applyQueuedUrlWriters, dispatchCommand } from './command-dispatch.ts'
 
 function facade() {
   return {
@@ -24,5 +24,24 @@ describe('queued debug.setUrlWriter', () => {
     dispatchCommand(api, ['debug.setUrlWriter', 'replace'])
     dispatchCommand(api, ['debug.setUrlWriter'])
     expect(api.debug.setUrlWriter).not.toHaveBeenCalled()
+  })
+})
+
+describe('applyQueuedUrlWriters', () => {
+  it('applies queued writers in order before startup and ignores everything else', () => {
+    const setUrlWriter = vi.fn()
+    const first = () => undefined
+    const second = () => undefined
+    applyQueuedUrlWriters(
+      [
+        ['debug.setEnabled', true],
+        ['debug.setUrlWriter', first],
+        ['debug.setUrlWriter', 'replace'],
+        'not-a-command',
+        ['debug.setUrlWriter', second],
+      ],
+      { setUrlWriter } as never,
+    )
+    expect(setUrlWriter.mock.calls).toEqual([[first], [second]])
   })
 })

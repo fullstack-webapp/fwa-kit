@@ -3,7 +3,7 @@ import {
   fwaTakeoverMessageType,
   localEdgeConfig,
 } from '../config.ts'
-import { dispatchCommand } from './command-dispatch.ts'
+import { applyQueuedUrlWriters, dispatchCommand } from './command-dispatch.ts'
 import { createFwaDebugRuntime } from './debug-runtime.ts'
 import {
   deriveFwaLoaderPaths,
@@ -113,6 +113,7 @@ function bootstrap(script: HTMLScriptElement) {
 
   fwa.version = fwaLoaderVersion
   fwa.localEdge = localEdge
+  applyQueuedUrlWriters(fwa.q, debug)
   debug.start()
   installCommandQueue(fwa, localEdge)
   runtime.start()

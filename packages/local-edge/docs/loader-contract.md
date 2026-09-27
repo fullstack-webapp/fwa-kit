@@ -69,7 +69,7 @@ The package client entry exports the same facade through `getFwaLocalEdge()` wit
 
 ## URL ownership
 
-The loader does not rewrite the application URL at startup, so `__fwa_debug=1` and `__fwa_debug=0` stay visible to the page until diagnostics change. The one exception is `__fwa_debug=reset`: the loader consumes it during startup, before the application has run and before any writer can be registered, with a direct `history.replaceState`. When diagnostics are later enabled or disabled through `debug.setEnabled` or the diagnostics panel, the loader removes `__fwa_debug` from the current URL without adding a history entry.
+The loader does not rewrite the application URL at startup, so `__fwa_debug=1` and `__fwa_debug=0` stay visible to the page until diagnostics change. The one exception is `__fwa_debug=reset`: the loader consumes it during startup, before the application has run. A writer queued with `['debug.setUrlWriter', writer]` before the loader executes is applied first and performs that removal; otherwise it is a direct `history.replaceState`. A writer registered through the facade after startup only applies to later changes. When diagnostics are later enabled or disabled through `debug.setEnabled` or the diagnostics panel, the loader removes `__fwa_debug` from the current URL without adding a history entry.
 
 By default that removal calls `history.replaceState` directly. An application whose router or navigation runtime is the only history writer registers its own writer instead:
 

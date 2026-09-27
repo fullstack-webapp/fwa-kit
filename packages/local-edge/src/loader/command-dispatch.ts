@@ -1,5 +1,5 @@
 import { isValidUpdateCheckIntervalMinutes } from '../config-contract.ts'
-import type { FwaLocalEdgeApi } from './loader-contract.ts'
+import type { FwaDebugApi, FwaLocalEdgeApi } from './loader-contract.ts'
 
 // Executes one queued `window.__fwa.q` command against the loader facade.
 // Malformed commands and arguments are ignored.
@@ -72,4 +72,19 @@ function isUpdateCheckCommandConfig(
     (intervalMinutes === undefined ||
       isValidUpdateCheckIntervalMinutes(intervalMinutes))
   )
+}
+
+/**
+ * Apply URL writers that the host queued before the loader ran, so the
+ * startup `__fwa_debug=reset` removal already goes through the host. The
+ * commands stay in the queue; replaying them later is idempotent.
+ */
+export function applyQueuedUrlWriters(queue: readonly unknown[], debug: FwaDebugApi) {
+  for (const command of queue) {
+    if (!Array.isArray(command) || command[0] !== 'debug.setUrlWriter') continue
+    const writer = command[1]
+    if (typeof writer === 'function' || writer === null) {
+      debug.setUrlWriter(writer)
+    }
+  }
 }
