@@ -55,7 +55,9 @@ export type FwaDebugStateListener = (state: FwaDebugState) => void
 /**
  * Replaces the current document URL with `url` (path, search and hash) without
  * adding a history entry. Hosts whose router owns history register one so the
- * loader never writes history behind the router's back.
+ * loader never writes history behind the router's back. It may complete
+ * asynchronously; the loader does not wait, and until it lands a reload still
+ * sees `__fwa_debug`.
  */
 export type FwaUrlWriter = (url: string) => void
 

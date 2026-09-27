@@ -96,8 +96,8 @@ function removeDebugSeedFromCurrentUrl(writer: FwaUrlWriter | null) {
     if (writer) {
       const result: unknown = writer(target)
       if (result instanceof Promise) {
-        // The writer is synchronous by contract; an async one must not leave
-        // an unhandled rejection behind.
+        // The writer may finish asynchronously; the loader does not wait for
+        // it, but a rejected promise must not surface as unhandled.
         result.catch(() => undefined)
       }
     } else {
