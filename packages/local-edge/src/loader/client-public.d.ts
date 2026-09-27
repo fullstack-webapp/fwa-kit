@@ -52,10 +52,22 @@ export interface FwaDebugState {
 
 export type FwaDebugStateListener = (state: FwaDebugState) => void
 
+/**
+ * Replaces the current document URL with `url` (path, search and hash) without
+ * adding a history entry. Hosts whose router owns history register one so the
+ * loader never writes history behind the router's back.
+ */
+export type FwaUrlWriter = (url: string) => void
+
 export interface FwaDebugApi {
   getState(): FwaDebugState
   subscribe(listener: FwaDebugStateListener): () => void
   setEnabled(enabled: boolean): void
+  /**
+   * Register how the loader removes `__fwa_debug` after a diagnostics change.
+   * `null` restores the default direct `history.replaceState`.
+   */
+  setUrlWriter(writer: FwaUrlWriter | null): void
 }
 
 export interface FwaLocalEdgeApi {
@@ -82,6 +94,7 @@ export type FwaQueuedCommand =
   | readonly ['debug.getState', (state: FwaDebugState) => void]
   | readonly ['debug.subscribe', FwaDebugStateListener]
   | readonly ['debug.setEnabled', boolean]
+  | readonly ['debug.setUrlWriter', FwaUrlWriter | null]
 
 export interface FwaGlobal {
   q: FwaQueuedCommand[]

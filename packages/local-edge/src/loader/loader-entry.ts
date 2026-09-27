@@ -201,6 +201,11 @@ function dispatchCommand(localEdgeApi: FwaLocalEdgeApi, command: unknown) {
         localEdgeApi.debug.setEnabled(argument)
       }
       break
+    case 'debug.setUrlWriter':
+      if (typeof argument === 'function' || argument === null) {
+        localEdgeApi.debug.setUrlWriter(argument)
+      }
+      break
   }
 }
 

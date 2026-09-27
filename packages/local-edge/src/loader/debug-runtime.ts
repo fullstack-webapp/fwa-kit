@@ -12,6 +12,7 @@ import type {
   FwaDebugState,
   FwaDebugStateListener,
   FwaLocalEdgeApi,
+  FwaUrlWriter,
 } from './loader-contract.ts'
 
 interface FwaDebugRuntime extends FwaDebugApi {
@@ -27,6 +28,7 @@ export function createFwaDebugRuntime(
   let state = initialState
   let started = false
   let destroyPanel: (() => void) | undefined
+  let urlWriter: FwaUrlWriter | null = null
 
   const publish = (enabled: boolean) => {
     state = { enabled }
@@ -52,7 +54,7 @@ export function createFwaDebugRuntime(
 
   const setEnabled = (enabled: boolean) => {
     setFwaDebugPreference(enabled)
-    removeDebugSeedFromCurrentUrl()
+    removeDebugSeedFromCurrentUrl(urlWriter)
     applyEnabled(enabled)
   }
 
@@ -63,7 +65,7 @@ export function createFwaDebugRuntime(
     const currentUrl = new URL(window.location.href)
     const enabled = fwaDebugPreferenceEnabledFor(currentUrl)
     if (localEdgeDebugSeedFor(currentUrl) === 'reset') {
-      removeDebugSeedFromCurrentUrl()
+      removeDebugSeedFromCurrentUrl(urlWriter)
     }
     applyEnabled(enabled)
   }
@@ -76,21 +78,25 @@ export function createFwaDebugRuntime(
       return () => listeners.delete(listener)
     },
     setEnabled,
+    setUrlWriter(writer) {
+      urlWriter = typeof writer === 'function' ? writer : null
+    },
     start,
   }
 }
 
-function removeDebugSeedFromCurrentUrl() {
+function removeDebugSeedFromCurrentUrl(writer: FwaUrlWriter | null) {
   const currentUrl = new URL(window.location.href)
   if (!currentUrl.searchParams.has(localEdgeDebugQueryParameter)) return
 
   currentUrl.searchParams.delete(localEdgeDebugQueryParameter)
+  const target = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`
   try {
-    window.history.replaceState(
-      window.history.state,
-      '',
-      `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`,
-    )
+    if (writer) {
+      writer(target)
+    } else {
+      window.history.replaceState(window.history.state, '', target)
+    }
   } catch {
     // The runtime state and durable preference remain authoritative.
   }
