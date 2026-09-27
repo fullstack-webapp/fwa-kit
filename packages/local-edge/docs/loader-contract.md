@@ -80,7 +80,7 @@ getFwaLocalEdge()?.debug.setUrlWriter((url) => {
 })
 ```
 
-The writer receives the target as `pathname + search + hash` and must replace the current entry synchronously. Its return value is ignored; if it throws or returns a rejected promise, the diagnostics state and stored preference still change and only the URL keeps the stale parameter. Passing `null` restores the direct write; any other non-function value is ignored.
+The writer receives the target as `pathname + search + hash` and replaces the current entry without adding a history entry. It may complete asynchronously, for example through a router transaction; the loader does not wait. Until the replacement lands, the URL still carries `__fwa_debug`, and a reload in that window applies the parameter again. If the writer throws or returns a rejected promise, the diagnostics state and stored preference still change and only the URL keeps the stale parameter. Passing `null` restores the direct write; any other non-function value is ignored.
 
 ## Command queue
 
