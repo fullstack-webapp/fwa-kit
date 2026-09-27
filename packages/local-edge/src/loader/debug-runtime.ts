@@ -79,7 +79,8 @@ export function createFwaDebugRuntime(
     },
     setEnabled,
     setUrlWriter(writer) {
-      urlWriter = typeof writer === 'function' ? writer : null
+      if (writer === null) urlWriter = null
+      else if (typeof writer === 'function') urlWriter = writer
     },
     start,
   }
@@ -93,7 +94,12 @@ function removeDebugSeedFromCurrentUrl(writer: FwaUrlWriter | null) {
   const target = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`
   try {
     if (writer) {
-      writer(target)
+      const result: unknown = writer(target)
+      if (result instanceof Promise) {
+        // The writer is synchronous by contract; an async one must not leave
+        // an unhandled rejection behind.
+        result.catch(() => undefined)
+      }
     } else {
       window.history.replaceState(window.history.state, '', target)
     }
