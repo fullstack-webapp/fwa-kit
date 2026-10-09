@@ -737,6 +737,52 @@ describe('createLocalEdgeDocumentRuntime', () => {
       expect(waitingWorker.state).toBe('activated')
     })
 
+    for (const { name, state, scriptURL } of [
+      {
+        name: 'does not wait for a worker another tab already activated',
+        state: 'activated' as ServiceWorkerState,
+        scriptURL: workerUrl,
+      },
+      {
+        name: 'leaves a waiting worker of another script alone',
+        state: 'installed' as ServiceWorkerState,
+        scriptURL: 'https://app.example/other-worker.js',
+      },
+    ]) {
+      it(name, async () => {
+        const fakeScheduler = createFakeScheduler()
+        const { runtime, reload, readWaitingWorker } = createControlledKernel({
+          scheduler: fakeScheduler.scheduler,
+          updateCheck: { intervalMinutes: 5 },
+          revalidationReleaseId: 'release-b',
+          revalidationStatus: 'updated',
+        })
+        const waitingWorker = Object.assign(new EventTarget(), {
+          scriptURL,
+          state,
+          postMessage: vi.fn(),
+        })
+        readWaitingWorker.mockResolvedValue(
+          waitingWorker as unknown as ServiceWorker,
+        )
+        await settle(runtime)
+        fakeScheduler.elapse(updateCheckIntervalMs)
+        fakeScheduler.triggerVisible()
+        await vi.waitFor(() => {
+          expect(runtime.getState().updateAvailable).toBe(true)
+        })
+
+        expect(runtime.applyUpdate()).toBe(true)
+        // Well inside the 3 s takeover cap.
+        await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1), {
+          timeout: 500,
+        })
+        if (scriptURL !== workerUrl) {
+          expect(waitingWorker.postMessage).not.toHaveBeenCalled()
+        }
+      })
+    }
+
     it('applies an update with a plain reload when no worker is waiting', async () => {
       const fakeScheduler = createFakeScheduler()
       const { runtime, reload } = createControlledKernel({

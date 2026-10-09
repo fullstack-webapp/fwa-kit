@@ -907,6 +907,8 @@ export function createLocalEdgeDocumentRuntime(
         }
       }
       waitingWorker.addEventListener('statechange', handleStateChange)
+      // Another tab may have applied the update since the worker was read.
+      handleStateChange()
       waitingWorker.postMessage({ type: fwaTakeoverMessageType })
     })
   }
