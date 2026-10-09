@@ -28,6 +28,7 @@ import {
   localEdgeControlPathsFor,
   pathWithLocalEdgeNavigationMode,
   localEdgeNavigationModeFor,
+  fwaTakeoverMessageType,
 } from '../config-contract.ts'
 import type {
   LocalEdgeClientState,
@@ -51,6 +52,12 @@ export interface LocalEdgeUpdateCheckConfig {
 interface LocalEdgeRegistrationOwner {
   registerServiceWorker(): Promise<ServiceWorkerRegistration>
   replaceServiceWorker(): Promise<ServiceWorkerRegistration>
+  // Re-fetches the worker script now. A long-lived document does not navigate,
+  // and the browser checks for a new worker on its own only on navigations or
+  // on a subresource request once the registration is over 24 hours stale.
+  checkForWorkerUpdate(): Promise<void>
+  // An installed worker waiting for every controlled client to close.
+  readWaitingWorker(): Promise<ServiceWorker | null>
 }
 
 export interface LocalEdgeDocumentScheduler {
@@ -93,6 +100,9 @@ interface LocalEdgeDocumentRuntime {
 }
 
 const maxSnapshotPullAttempts = 8
+// Upper bound on waiting for a user-applied worker takeover before reloading
+// anyway; the reload then still opens the new release under the old worker.
+const waitingWorkerActivationTimeoutMs = 3_000
 
 const initialState: LocalEdgeClientState = {
   phase: 'starting',
@@ -548,6 +558,11 @@ export function createLocalEdgeDocumentRuntime(
     if (!silent) {
       showRevalidationActivity()
     }
+    if (navigator.serviceWorker?.controller) {
+      // Worker discovery rides on the release check cadence. It is
+      // best-effort: a failed script fetch must not fail the release check.
+      void registrationOwner.checkForWorkerUpdate().catch(() => undefined)
+    }
     revalidationInFlight = runRevalidation().finally(() => {
       if (revalidationVisible && state.revalidating) {
         publish({
@@ -862,8 +877,40 @@ export function createLocalEdgeDocumentRuntime(
     if (!state.updateAvailable || !state.availableReleaseId) {
       return false
     }
-    window.location.reload()
+    // A reload alone cannot activate a waiting worker: the reloading document
+    // is still a client when the new navigation starts. Applying an update the
+    // user asked for therefore lets the waiting worker take over first.
+    void activateWaitingWorker()
+      .catch(() => undefined)
+      .finally(() => window.location.reload())
     return true
+  }
+
+  const activateWaitingWorker = async () => {
+    const waitingWorker = await registrationOwner.readWaitingWorker()
+    if (!waitingWorker || !workerMatchesPath(waitingWorker, config.workerPath)) {
+      return
+    }
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(finish, waitingWorkerActivationTimeoutMs)
+      function finish() {
+        clearTimeout(timeout)
+        waitingWorker!.removeEventListener('statechange', handleStateChange)
+        resolve()
+      }
+      function handleStateChange() {
+        if (
+          waitingWorker!.state === 'activated' ||
+          waitingWorker!.state === 'redundant'
+        ) {
+          finish()
+        }
+      }
+      waitingWorker.addEventListener('statechange', handleStateChange)
+      // Another tab may have applied the update since the worker was read.
+      handleStateChange()
+      waitingWorker.postMessage({ type: fwaTakeoverMessageType })
+    })
   }
 
   const reset = async () => {

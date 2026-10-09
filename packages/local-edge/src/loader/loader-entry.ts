@@ -45,6 +45,11 @@ function bootstrap(script: HTMLScriptElement) {
         navigator.serviceWorker.register(paths.workerPath, {
           scope: paths.scopePath,
         }),
+      checkForWorkerUpdate: async () => {
+        await (await readOwnedRegistration())?.update()
+      },
+      readWaitingWorker: async () =>
+        (await readOwnedRegistration())?.waiting ?? null,
       replaceServiceWorker: async () => {
         const registrations = await navigator.serviceWorker.getRegistrations()
         const ownedRegistrations = registrations.filter(
@@ -96,6 +101,13 @@ function bootstrap(script: HTMLScriptElement) {
       },
     },
   )
+  async function readOwnedRegistration() {
+    const registrations = await navigator.serviceWorker.getRegistrations()
+    return registrations.find(
+      (registration) =>
+        new URL(registration.scope).pathname === paths.scopePath,
+    )
+  }
   let localEdge: FwaLocalEdgeApi
   const debug = createFwaDebugRuntime(() => localEdge)
   localEdge = Object.freeze({

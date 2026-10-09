@@ -2169,6 +2169,155 @@ test.describe('Local Edge v0', () => {
     }
   })
 
+  test('a reset in another tab leaves no release cache behind', async ({
+    browser,
+  }) => {
+    const releaseServer = await startReleaseUpdateServer()
+    const context = await browser.newContext()
+    const previousPage = await context.newPage()
+    const updatedPage = await context.newPage()
+    const releaseCaches = (page: typeof previousPage) =>
+      page.evaluate(async () =>
+        (await caches.keys()).filter((cacheName) =>
+          cacheName.startsWith('fwa-local-edge:fwa-local-edge-demo:release:'),
+        ),
+      )
+
+    try {
+      await previousPage.goto(releaseServer.baseUrl)
+      await expect(previousPage.locator('[data-local-edge-status]')).toHaveAttribute(
+        'data-local-edge-status',
+        'ready',
+        { timeout: 20_000 },
+      )
+      await previousPage.evaluate(() =>
+        fetch('/__test/switch-release', { method: 'POST' }),
+      )
+      await updatedPage.goto(releaseServer.baseUrl)
+      await reloadAvailableUpdate(updatedPage)
+      await expect(
+        updatedPage.locator('meta[name="fwa-test-release"]'),
+      ).toHaveAttribute('content', 'app-update', { timeout: 20_000 })
+
+      // The client reset also unregisters and reopens the tab on the network.
+      await Promise.all([
+        updatedPage.waitForURL(/[?&]__fwa=network/u, { timeout: 20_000 }),
+        updatedPage.evaluate(() =>
+          (
+            globalThis as typeof globalThis & {
+              __fwa: { localEdge: { reset(): Promise<void> } }
+            }
+          ).__fwa.localEdge.reset(),
+        ),
+      ])
+      expect(
+        await updatedPage.evaluate(
+          async () => (await navigator.serviceWorker.getRegistrations()).length,
+        ),
+      ).toBe(0)
+
+      // The previous tab is still controlled by the reset worker instance and
+      // keeps issuing requests through it: a lazy asset of its pinned release,
+      // a descriptor revalidation, and a navigation-free state read.
+      await previousPage.evaluate(async (assetPath) => {
+        await import(assetPath).catch(() => undefined)
+        await fetch('/__fwa/revalidate', {
+          method: 'POST',
+          headers: { 'X-FWA-Control': 'revalidate' },
+        }).catch(() => undefined)
+        await fetch('/__fwa/state').catch(() => undefined)
+      }, releaseServer.initialLazyAssetPath)
+      await previousPage.waitForTimeout(2_000)
+
+      expect(await releaseCaches(previousPage)).toEqual([])
+      expect(await releaseCaches(updatedPage)).toEqual([])
+    } finally {
+      await context.close()
+      await releaseServer.close()
+    }
+  })
+
+  test('finds a new worker on a release check and applies it with the update', async ({
+    browser,
+  }) => {
+    const releaseServer = await startReleaseUpdateServer()
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const workerGeneration = () =>
+      page.evaluate(() =>
+        fetch('/__test/worker-generation', { cache: 'no-store' }).then(
+          (response) => response.text(),
+        ),
+      )
+    type LocalEdgeTestWindow = typeof globalThis & {
+      __fwa: {
+        localEdge: {
+          revalidate(): Promise<unknown>
+          getState(): { updateAvailable: boolean }
+          applyUpdate(): boolean
+        }
+      }
+    }
+
+    try {
+      await page.goto(releaseServer.baseUrl)
+      await expect(page.locator('[data-local-edge-status]')).toHaveAttribute(
+        'data-local-edge-status',
+        'ready',
+        { timeout: 20_000 },
+      )
+      expect(await workerGeneration()).toBe('1')
+
+      // One deploy changes both the release and the worker script, while the
+      // document stays open: no navigation reaches the browser's own check.
+      await page.evaluate(async () => {
+        await fetch('/__test/switch-release', { method: 'POST' })
+        await fetch('/__test/switch-worker', { method: 'POST' })
+      })
+      await page.evaluate(() =>
+        (globalThis as LocalEdgeTestWindow).__fwa.localEdge.revalidate(),
+      )
+      await expect
+        .poll(() =>
+          page.evaluate(async () => {
+            const registration =
+              await navigator.serviceWorker.getRegistration()
+            return {
+              updateAvailable: (
+                globalThis as LocalEdgeTestWindow
+              ).__fwa.localEdge.getState().updateAvailable,
+              workerWaiting: Boolean(registration?.waiting),
+            }
+          }),
+        )
+        .toEqual({ updateAvailable: true, workerWaiting: true })
+      // Until the user applies the update, the open document keeps its worker.
+      expect(await workerGeneration()).toBe('1')
+
+      await Promise.all([
+        page.waitForEvent('load'),
+        page.evaluate(() =>
+          (globalThis as LocalEdgeTestWindow).__fwa.localEdge.applyUpdate(),
+        ),
+      ])
+      await expect(page.locator('meta[name="fwa-test-release"]')).toHaveAttribute(
+        'content',
+        'app-update',
+        { timeout: 20_000 },
+      )
+      expect(await workerGeneration()).toBe('2')
+      expect(
+        await page.evaluate(
+          async () =>
+            Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
+        ),
+      ).toBe(false)
+    } finally {
+      await context.close()
+      await releaseServer.close()
+    }
+  })
+
   test('installs a third release while older clients stay pinned', async ({
     browser,
   }) => {

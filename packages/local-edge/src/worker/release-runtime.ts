@@ -247,29 +247,25 @@ export async function pinRequestClient(event: FetchEvent, releaseId: string) {
   )
 }
 
+// Release reads go through CacheStorage.match with a cacheName: it resolves
+// undefined for a missing cache instead of creating one. `caches.open` would
+// recreate a cache that reset or cleanup deleted between a `has` check and the
+// open, leaving an empty app-owned cache behind (spec §3.2: no resurrection).
+function matchReleaseAsset(releaseId: string, assetPath: string) {
+  return caches.match(assetPath, { cacheName: releaseCacheName(releaseId) })
+}
+
 export async function readReleaseAsset(
   release: AppRelease,
   assetPath: string,
 ) {
-  const cacheName = releaseCacheName(release.releaseId)
-  if (!(await caches.has(cacheName))) {
-    return undefined
-  }
-
-  const releaseCache = await caches.open(cacheName)
-  return releaseCache.match(assetPath)
+  return matchReleaseAsset(release.releaseId, assetPath)
 }
 
 export async function isReleaseComplete(release: AppRelease) {
-  const cacheName = releaseCacheName(release.releaseId)
-  if (!(await caches.has(cacheName))) {
-    return false
-  }
-
-  const releaseCache = await caches.open(cacheName)
   const matches = await Promise.all(
     releaseAssetPaths(release).map((assetPath) =>
-      releaseCache.match(assetPath),
+      matchReleaseAsset(release.releaseId, assetPath),
     ),
   )
   return matches.every(Boolean)
@@ -451,11 +447,11 @@ async function revalidateRelease(
     let terminalIdentity = currentKernelObservationIdentity()
     await withCandidateCacheLock(async () => {
       commitBaseState = await readReleaseState(requiredMetadataEpoch())
-      // Reopen by name for final verification: a Cache object detached by a
-      // concurrent delete must never authorize an unreachable committed release.
-      const finalCandidateCache = await caches.open(candidateCacheName)
+      // Verify by name, not through the Cache object used for install: a Cache
+      // detached by a concurrent delete must never authorize an unreachable
+      // committed release, and the lookup must not recreate a deleted cache.
       for (const asset of release.assets) {
-        if (!(await finalCandidateCache.match(asset.path))) {
+        if (!(await matchReleaseAsset(release.releaseId, asset.path))) {
           throw new Error(`${asset.path} missing after candidate install`)
         }
       }
