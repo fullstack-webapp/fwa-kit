@@ -63,6 +63,14 @@ publishes the material runtime transition out of network-only mode. Switching
 from an already active release remains owned by the next navigation or
 `applyUpdate()`.
 
+Each check from a controlled document also asks the browser to re-fetch the
+worker script (`registration.update()`, best-effort). A long-lived document
+does not navigate, and browsers otherwise check for a new worker only on
+navigations, or on a subresource request once the registration is more than 24
+hours stale. A new worker found this way still waits for every controlled
+document to close; `applyUpdate()` lets it take over before reloading, so the
+user-applied update reaches both the new release and the new worker.
+
 `window.__fwa.localEdge.setUpdateCheck()` can enable, disable, or change the
 interval for the current document. This override is not written to browser
 storage and does not change `fwa.config.json`.

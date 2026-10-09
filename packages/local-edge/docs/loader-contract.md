@@ -51,7 +51,7 @@ unsubscribe?.()
 | `subscribe(listener)` | Emit immediately and on later state changes |
 | `revalidate()` | Check and install a candidate; return `current`, `updated`, `failed`, or `disabled` |
 | `setUpdateCheck(config)` | Change the enabled state or interval (1–35,791 minutes) for the current document without persistence |
-| `applyUpdate()` | Reload only when a complete update is available |
+| `applyUpdate()` | Reload only when a complete update is available; a new worker waiting to activate takes over first (bounded to 3 seconds) |
 | `reset()` | Clear Local Edge-owned state and enter network mode |
 | `networkUrl(url?)` | Preserve the URL while adding `__fwa=network` |
 | `openNetwork()` | Navigate to `networkUrl()` |

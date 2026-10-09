@@ -149,6 +149,12 @@ describe('release-runtime candidate install progress', () => {
           match: vi.fn(async (path: string) => entries.get(path)),
         }
       }),
+      match: vi.fn(
+        async (path: string, options?: { cacheName?: string }) =>
+          options?.cacheName
+            ? cacheStore.get(options.cacheName)?.get(path)
+            : undefined,
+      ),
       keys: vi.fn(async () => [...cacheStore.keys()]),
       delete: vi.fn(async (name: string) => cacheStore.delete(name)),
     }
@@ -183,6 +189,22 @@ describe('release-runtime candidate install progress', () => {
       'metadata-epoch-test',
       releaseId,
     )
+  })
+
+  it('reads a release deleted after an existence check without recreating it', async () => {
+    const release = (verifierState.descriptor as {
+      release: Parameters<typeof runtime.readReleaseAsset>[0]
+    }).release
+    // Reset or cleanup deletes the cache between an existence check and the
+    // read: `has` still answers true, but the cache is gone.
+    vi.mocked(caches.has).mockResolvedValue(true)
+
+    expect(
+      await runtime.readReleaseAsset(release, '/index.html'),
+    ).toBeUndefined()
+    expect(await runtime.isReleaseComplete(release)).toBe(false)
+
+    expect([...cacheStore.keys()]).toEqual([])
   })
 
   it('broadcasts progress through the install and a committed message on success', async () => {
@@ -789,6 +811,12 @@ describe('release-runtime candidate install progress', () => {
           match: vi.fn(async (path: string) => entries.get(path)),
         }
       }),
+      match: vi.fn(
+        async (path: string, options?: { cacheName?: string }) =>
+          options?.cacheName
+            ? cacheStoreForDrain.get(options.cacheName)?.get(path)
+            : undefined,
+      ),
       keys: vi.fn(async () => [...cacheStoreForDrain.keys()]),
       delete: vi.fn(async (name: string) => cacheStoreForDrain.delete(name)),
     })

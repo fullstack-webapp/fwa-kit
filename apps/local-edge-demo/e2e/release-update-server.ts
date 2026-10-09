@@ -130,8 +130,40 @@ export async function startReleaseUpdateServer(
     allowCandidateAsset = resolveAsset
   })
 
+  // A second worker generation differs only by an appended fetch listener
+  // that answers the generation probe; the first generation leaves the probe
+  // to the network, which answers 1.
+  let workerGeneration = 1
+  const workerGenerationProbePath = '/__test/worker-generation'
+  const secondWorkerGenerationSuffix = Buffer.from(
+    `\nself.addEventListener('fetch', (event) => {\n` +
+      `  if (new URL(event.request.url).pathname === '${workerGenerationProbePath}') {\n` +
+      `    event.respondWith(new Response('2', { headers: { 'Cache-Control': 'no-store' } }))\n` +
+      `  }\n` +
+      `})\n`,
+  )
+
   const server = createServer(async (request, response) => {
     const requestUrl = new URL(request.url ?? '/', 'http://localhost')
+
+    if (
+      request.method === 'POST' &&
+      requestUrl.pathname === '/__test/switch-worker'
+    ) {
+      workerGeneration = 2
+      respond(response, Buffer.from('{}'), {
+        contentType: 'application/json; charset=utf-8',
+        cacheControl: 'no-store',
+      })
+      return
+    }
+    if (requestUrl.pathname === workerGenerationProbePath) {
+      respond(response, Buffer.from('1'), {
+        contentType: 'text/plain; charset=utf-8',
+        cacheControl: 'no-store',
+      })
+      return
+    }
 
     if (
       request.method === 'POST' &&
@@ -305,7 +337,13 @@ export async function startReleaseUpdateServer(
         throw new Error('path escapes dist root')
       }
 
-      respond(response, await readFile(filePath), {
+      const fileBody = await readFile(filePath)
+      respond(
+        response,
+        requestUrl.pathname === localEdgeConfig.workerPath && workerGeneration === 2
+          ? Buffer.concat([fileBody, secondWorkerGenerationSuffix])
+          : fileBody,
+        {
         contentType: contentTypeFor(filePath),
         cacheControl:
           requestUrl.pathname === localEdgeConfig.workerPath ||
@@ -313,7 +351,8 @@ export async function startReleaseUpdateServer(
             ? 'no-cache'
             : 'public, max-age=31536000, immutable',
         headOnly: request.method === 'HEAD',
-      })
+        },
+      )
     } catch {
       response
         .writeHead(404, {

@@ -58,6 +58,8 @@ The metadata epoch fences durable authority across worker globals and reset. Whe
 
 During a candidate install the worker keeps an in-memory progress counter and broadcasts best-effort `__fwa:revalidation-progress` messages to window clients, plus a single `__fwa:revalidation-committed` message after the active pointer is committed or a `__fwa:revalidation-failed` message when the install attempt does not commit. Progress stays in memory only; a worker restart clears it and clients fall back to activity UI. The kernel-issued instance and revision ordering shared by messages, snapshots, and responses is defined in [Revalidation observation ordering](revalidation-observation.md).
 
+Worker script updates follow the browser's lifecycle and are never forced into an open document: the document runtime only speeds up discovery on its release checks, and a waiting worker takes over when every controlled document closes or when the user applies an update. Cache Storage reads go through `caches.match` with a cache name, so a read never recreates a release cache that reset or cleanup deleted.
+
 This is release-level stale-while-revalidate. It is not per-request HTTP stale-while-revalidate and does not promise the newest release while offline.
 
 ## Dependency direction
